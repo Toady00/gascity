@@ -455,6 +455,45 @@ Makefile is insufficient because each nested runner rebuilds the environment
 and would otherwise restore user Git configuration through the preserved
 `HOME`.
 
+## Rebuilding bd alongside a local gc release
+
+`gc` links the beads library, and the `bd` CLI is a separate binary. Cutting a
+local `gc` release without refreshing `bd` lets the two drift apart, so rebuild
+both together and always pin `bd` to the commit `go.mod` names — never to beads
+`main`, which is what actually creates a mismatch:
+
+```bash
+PIN=$(rg -o 'github.com/steveyegge/beads v\S+' go.mod | awk '{print $2}')
+VER=${PIN#v}; SHA=${PIN##*-}
+
+cd <beads worktree checked out at $SHA>
+go build -tags gms_pure_go \
+  -ldflags "-X main.Version=$VER -X main.Build=$SHA" \
+  -o bd ./cmd/bd
+codesign -s - -f bd
+install -m 0755 bd ~/.local/bin/bd
+codesign -s - -f ~/.local/bin/bd
+```
+
+Three details are load-bearing:
+
+- **`-tags gms_pure_go`** is beads' own `BUILD_TAGS`. Without it the build takes
+  the CGO path and needs the same keg-only ICU flags the `gc` Makefile projects.
+- **`codesign -s - -f` is mandatory on Apple Silicon**, and again after any
+  `cp`/`install`, because copying a Mach-O invalidates its signature. An
+  unsigned or stale-signed `bd` is killed by the kernel with `Killed: 9` on the
+  next exec, which reads like a corrupt binary rather than a signing problem.
+- **`-X main.Version` / `-X main.Build`** are what make `bd version` report the
+  pinned pseudo-version. `go install ...@<pin>` gets the module version right
+  but leaves the reported version at its `1.1.0 (dev)` default, which is what a
+  version check actually compares.
+
+A `version_compat` / `native_store_unavailable` warning is **not** proof of a
+real mismatch. Confirm with `bd version` against the `go.mod` pin before
+rebuilding anything: gascity #5184 fixed a check that string-compared a
+pseudo-version it could never match and reported a mismatch it had no evidence
+for.
+
 ## Code quality gates
 
 Before considering any task complete:
