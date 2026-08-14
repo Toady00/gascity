@@ -70,6 +70,13 @@ type hookClaimOps struct {
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
 	Now           func() time.Time
+	// ClassRoute is the relocated coordination-class binding these seams
+	// escalate to, or nil on a city that relocates nothing. It is not a seam:
+	// it is here so claimHookWorkWithRunner — the only caller that knows the
+	// whole work fan-out — can hand the route its leg set, which is what lets a
+	// not-found from ONE leg be checked against the others before it opens the
+	// escalation. See claim_class_route.go.
+	ClassRoute *hookClaimClassRoute
 }
 
 type (
@@ -113,8 +120,10 @@ type hookClaimResult struct {
 	// candidates' claim mutations errored and nothing was ultimately claimed. It
 	// lets the shared no-work drain report a distinct "claims_errored" reason
 	// instead of a healthy "no_work", so an operational write failure (store
-	// contention or a controller-socket flap in the read→write window) is not
-	// laundered into an idle signal. Meaningless on a terminal result.
+	// contention or a controller-socket flap in the read→write window) — or an
+	// assigned candidate this store cannot resolve at all, the split-city
+	// see-but-cannot-claim shape — is not laundered into an idle signal.
+	// Meaningless on a terminal result.
 	claimsErrored bool
 }
 
@@ -182,7 +191,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if readyResult.terminal {
 		return readyResult
 	}
-	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	eligibleResult := claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+	// A skipped assigned-tier claim error must survive the handoff to the routed
+	// tier: both tiers feed ONE shared drain, and dropping the flag here would
+	// launder an assigned-tier write failure into a healthy no_work.
+	if !eligibleResult.terminal && readyResult.claimsErrored {
+		eligibleResult.claimsErrored = true
+	}
+	return eligibleResult
 }
 
 // applyDefaults fills any unset op seam with its production implementation, so
@@ -225,9 +241,17 @@ func (ops *hookClaimOps) applyDefaults() {
 // already assigned to this session. Continuation preassignment deliberately
 // leaves later group members open, so a resumed session must still run the
 // store's idempotent claim mutation before it reports the bead as workable.
+//
+// A candidate whose claim errors because THIS store cannot resolve the id is
+// skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
+// caller can try the store that actually holds it; the returned result's
+// claimsErrored flag carries the skip to the shared drain. Every other claim
+// error still fails closed: ownership is unresolved on a bead this session
+// already owns, and claiming unrelated fresh work would strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
+	claimsErrored := false
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
@@ -246,6 +270,24 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
+				// The read federated and the write did not: the assigned tier
+				// reads city-wide, so a graph step in a relocated class store
+				// arrives here while the claim runs against this store's bd
+				// context, which cannot resolve it. That is not an unresolved
+				// mutation on a bead we own here — this store holds no such bead —
+				// so skip it and let the federated caller try the store that does.
+				//
+				// A binding that refuses the claim CAS outright carries the same
+				// proof and is skipped for the same reason: the escalation only
+				// ran because a work store returned not-found, and the refusal
+				// lands before any write (hookClaimBindingRefusedTheClaim). One
+				// bead no store can claim must not stop this session claiming
+				// the work that other stores can.
+				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
+				claimsErrored = true
+				continue
+			}
 			if ok {
 				fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
 			} else {
@@ -294,7 +336,22 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, stdout, stderr)}
 	}
-	return hookClaimResult{}
+	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// hookClaimBeadIsElsewhere reports whether a failed claim proves the bead is not
+// in the store this claim ran against, rather than that the write itself failed.
+//
+// It exists because the assigned-ready work-query tier reads city-wide on a
+// split city (`gc ready --assignee`) while the claim still runs against the
+// agent's work-directory bd context, so a graph step in a relocated class store
+// is visible-but-unclaimable until the claim is class-routed (ga-601v2).
+// beads.ErrNotFound is the ONLY error that carries that proof: BdStore.Claim
+// wraps it when bd reports no such issue, and every other failure — a write
+// timeout, store contention, a controller-socket flap — leaves ownership
+// unresolved and must keep failing closed.
+func hookClaimBeadIsElsewhere(err error) bool {
+	return errors.Is(err, beads.ErrNotFound)
 }
 
 // claimFirstEligibleHookCandidate claims the first unassigned, route-matched
@@ -551,7 +608,28 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	claimed, ok, err := store.Claim(beadID)
+	return hookClaimThroughStore(beadID, assignee,
+		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
+		store.Get)
+}
+
+// hookClaimThroughStore is the post-mutation classification shared by every
+// store a claim can run against: the work-directory bd context here, and the
+// relocated class binding in claim_class_route.go.
+//
+// It is factored out rather than duplicated because the classification IS the
+// contract the caller reads — a lost race must be reported as a rejection and
+// not as an error, a stale projection must not be treated as ours, and a failed
+// canonical readback must be surfaced with ok=true so the caller stops instead
+// of draining. Two copies of that would be two chances to disagree, and the
+// paths that disagree about ownership are this program's recurring bug class.
+//
+// claim and get are the store's own operations: the bd context's Claim takes the
+// assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
+// binding's takes it explicitly, so the caller binds them and this function
+// never has to know which shape it is holding.
+func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+	claimed, ok, err := claim()
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
@@ -559,19 +637,20 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 		// Claim conflict: re-read the bead so the caller can surface who won
 		// the race in the bead.claim_rejected event (ADR-0009). Best-effort —
 		// a read error degrades to a silent no-op (empty bead, no event).
-		current, getErr := store.Get(beadID)
+		current, getErr := get(beadID)
 		if getErr != nil {
 			return beads.Bead{}, false, nil
 		}
 		return current, false, nil
 	}
 	if !hookClaimHasIdentity(claimed.Assignee, []string{assignee}) {
-		// bd reported a successful mutation but the bead is owned by another
-		// claimant (stale projection / lost race). Return it as a non-claim so
-		// the caller can report the rejection rather than treat it as ours.
+		// The store reported a successful mutation but the bead is owned by
+		// another claimant (stale projection / lost race). Return it as a
+		// non-claim so the caller can report the rejection rather than treat it
+		// as ours.
 		return claimed, false, nil
 	}
-	canonical, err := store.Get(beadID)
+	canonical, err := get(beadID)
 	if err != nil {
 		return claimed, true, fmt.Errorf("reloading claimed bead %q: %w", beadID, err)
 	}

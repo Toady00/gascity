@@ -459,7 +459,21 @@ func buildDesiredStateWithSessionBeads(
 		}
 		backsNamedSession := namedSessionMode != ""
 
-		sp := scaleParamsForBeads(&cfg.Agents[i], cfg.Beads)
+		// Controller-owned: config.QueryTopology{Beads: ...} and NOT
+		// cityQueryTopology. Resolving the federation fact means asking the
+		// storage routes, and the one-shot funnel that answers for a CLI command
+		// (cliStorageRoutes) is explicitly for the half of the program that
+		// "never builds a CityRuntime" — a controller reaching it would open the
+		// city's binding a second time in a process that already holds it open.
+		// The controller's own routes are the right source; threading them into
+		// this plumbing is a change to controller wiring, not part of swapping
+		// the reader, so it stays with the claim-routing slice (ga-601v2).
+		//
+		// Nothing executes this string on the controller path either: a
+		// default-probe pool counts in-process below (defaultScaleTargets), and a
+		// custom-scale_check pool runs the operator's own command, so the
+		// generated count-form is reached only by the legacy nil-store caller.
+		sp := scaleParamsForTopology(&cfg.Agents[i], config.QueryTopology{Beads: cfg.Beads})
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
@@ -872,7 +886,11 @@ func buildDesiredStateWithSessionBeads(
 					continue
 				}
 				tp.PoolSlot = poolSlot
-				setTemplateEnvIdentity(&tp, qualifiedInstance)
+				if usesTransientPoolSlotIdentity(cfgAgent) {
+					clearPoolTemplateRuntimeIdentity(&tp)
+				} else {
+					setTemplateEnvIdentity(&tp, qualifiedInstance)
+				}
 				installAgentSideEffects(bp, instanceAgent, tp, stderr)
 				desired[tp.SessionName] = tp
 			}
@@ -2680,7 +2698,11 @@ func ensureDependencyOnlyTemplate(
 		}
 		tp.DependencyOnly = true
 		tp.PoolSlot = poolSlot
-		setTemplateEnvIdentity(&tp, qualifiedInstance)
+		if usesTransientPoolSlotIdentity(cfgAgent) {
+			clearPoolTemplateRuntimeIdentity(&tp)
+		} else {
+			setTemplateEnvIdentity(&tp, qualifiedInstance)
+		}
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		desired[tp.SessionName] = tp
 		return
@@ -2982,10 +3004,14 @@ func realizePoolDesiredSessions(
 			// pool_slot metadata from before singleton normalization.
 			tp.PoolSlot = 0
 		} else {
-			tp.Alias = qualifiedInstance
 			tp.InstanceName = qualifiedInstance
 			tp.PoolSlot = poolSlot
-			setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
+			if usesTransientPoolSlotIdentity(cfgAgent) {
+				clearPoolTemplateRuntimeIdentity(&tp)
+			} else {
+				tp.Alias = qualifiedInstance
+				setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
+			}
 		}
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		desired[tp.SessionName] = tp
@@ -3159,6 +3185,32 @@ func safeWorkspaceName(value string, maxLen int) string {
 		}
 	}
 	return strings.Trim(b.String(), ".-_")
+}
+
+// usesTransientPoolSlotIdentity reports whether cfgAgent's pool members are
+// identified by a rebinding numeric slot ("rig/claude-1") rather than a stable
+// name. Such a slot is bookkeeping, not identity: the controller hands it to a
+// fresh session whenever the previous holder dies, so a work bead assigned to
+// it names a chair, not an occupant.
+//
+// That distinction decides whether a session may claim under the name.
+// `gc hook --claim` writes GC_ALIAS as the assignee (#4981), which is correct
+// for the stable identities — a configured named session, a canonical singleton
+// pool member, a namepool name like "nux" — because those double as the
+// session's mail address and stay put across restarts. A numeric slot does not,
+// and claiming under it produced ownership no reconciler guard could resolve to
+// a live session: the drain guard saw no assigned work and drained live
+// claim-holders. Transient slots therefore stay out of every identity channel
+// (bead alias, GC_ALIAS, GC_AGENT/BEADS_ACTOR) and the session claims under its
+// own session name, restoring the original unaliased-pool design (bc2ee15ac4).
+func usesTransientPoolSlotIdentity(cfgAgent *config.Agent) bool {
+	if cfgAgent == nil {
+		return false
+	}
+	if strings.TrimSpace(cfgAgent.Namepool) != "" || len(cfgAgent.NamepoolNames) > 0 {
+		return false
+	}
+	return !cfgAgent.UsesCanonicalSingletonPoolIdentity()
 }
 
 func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent, string, int) {
@@ -3958,7 +4010,21 @@ func createPoolSessionBeadWithGuardedAlias(
 		Slot:      slot,
 		Metadata:  metadata,
 	}
+	// A transient slot is never reserved as an alias: it is not an identity, so
+	// there is nothing to guard against collision and nothing to persist. The
+	// resolvedTmuxAlias lock lane below is unaffected — that one guards a
+	// runtime handle, not ownership.
+	//
+	// alias and persistAlias are deliberately different things. alias is the
+	// mutual-exclusion key: two controller goroutines racing the same slot must
+	// not both create a bead for it, and that is true whether or not the slot is
+	// an identity. persistAlias is what lands in the bead. For a transient slot
+	// the exclusion still applies and the persistence does not.
 	alias := strings.TrimSpace(qualifiedInstance)
+	persistAlias := alias
+	if usesTransientPoolSlotIdentity(cfgAgent) {
+		persistAlias = ""
+	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithAlias(bp.beadStore, template, bp.city, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, resolvedTmuxAlias)
 	}
@@ -3978,8 +4044,15 @@ func createPoolSessionBeadWithGuardedAlias(
 	lockErr := session.WithCitySessionIdentifierLocks(bp.cityPath, lockIDs, func() error {
 		createIdentity := identity
 		if alias != "" {
+			// The availability probe runs on the SLOT string even when the slot
+			// will not be persisted as an alias: it matches on session_name,
+			// alias, AND agent_name (session.ensureSessionAliasAvailable), and a
+			// transient pool bead still persists the slot as agent_name. So the
+			// occupancy question — including its released/closed exclusions — is
+			// answered identically either way; only the persistence is
+			// conditional.
 			if err := session.EnsureAliasAvailableWithConfig(bp.beadStore, bp.city, alias, ""); err == nil {
-				createIdentity.Alias = alias
+				createIdentity.Alias = persistAlias
 			}
 		}
 		var err error

@@ -33,6 +33,27 @@ package main
 // migrate this", it is "where is this class served from", and the funnel
 // answers that for every provider because the answer comes from the provider.
 //
+// # This IS the shared candidate list, with the work leg served by bd
+//
+// storeref.ClassCandidates is the tree's by-id resolver, and its answer for a
+// relocated city is [class, work] — the class store first, because it is the
+// sole MINTER of the reserved namespace, then the work store, because minting
+// is not holding. This surface probes exactly that list in exactly that order.
+// What differs is only how the work leg is READ: here it is the `bd`
+// subprocess, which is why the leg appears as a fall-through rather than as a
+// beads.Store. The in-process form of the same list, for the one-shot commands
+// that hold two ordinary stores, is by_id_store_route.go.
+//
+// The class leg is probed for EVERY id, not only for ids inside the class
+// namespace, and that is the one place this surface is deliberately STRONGER
+// than the shared resolver rather than merely equal to it. ClassCandidates
+// gates on the namespace before it builds a list (IDInNamespace), and `gc
+// storage migrate` preserves ids — so a bead the migration relocated keeps its
+// HQ/rig-era prefix and the resolver returns nil for exactly the ids that
+// moved. Only a residence probe reaches those, and without it their reads are
+// answered from the work store's retained pre-migration copy, frozen at
+// migration time. See resolve.
+//
 // # Three deliberate properties
 //
 //   - The routed operations take ONLY the closed contract
@@ -75,10 +96,17 @@ package main
 // nothing about what this surface implements.
 //
 // Ownership is read from an id in an ID POSITION and never from an id-shaped
-// value. A `gc bd list --metadata-field workflow_id=gcg-…` probe is a work
-// question that quotes a class id: the work store answers for its own rows and
-// must keep doing so. A `--parent gcg-…` names a class bead, and letting the
+// value. A `gc bd list --metadata-field workflow_id=gcg-…` probe quotes a class
+// id rather than addressing one, so this surface declines it — OWNERSHIP is not
+// what is wrong with it. A `--parent gcg-…` names a class bead, and letting the
 // work store answer that returns a silent empty result.
+//
+// Declining is not forwarding. That same selector is refused one pre-flight
+// earlier, by bd_relocated_classes.go, and for a different reason: `list` is a
+// PROJECTION over a class this ledger cannot see, so its `[]` is a confident
+// wrong answer whatever the id's position. The two doors ask different
+// questions — "who owns this bead" and "can this ledger answer this verb at
+// all" — and only the first one is answered here.
 //
 // # What entering costs, and who pays it
 //
@@ -554,7 +582,15 @@ func bdIDIsClassReserved(id string) bool {
 // door. handled=false means the caller proceeds on its existing path unchanged
 // — the city relocates no class, the invocation is not one of the routed by-ID
 // forms, or the id is a work-store id the class store does not answer for.
-func maybeRouteBdByID(cityPath string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
+//
+// rigName is the EXPLICIT --rig the operator wrote (or `gc --rig X bd …`, which
+// extractBdScopeFlags folds into the same value). It is never the auto-detected
+// scope: GC_RIG, -C and cwd resolve inside resolveBdScopeTarget and never reach
+// here, which is deliberate — a rig agent runs with GC_RIG set on every
+// invocation, so treating that as a deliberate scope would refuse the
+// step-completion write the core pack renders on every worked bead. See
+// refuseRigScopedClassOwnedTarget.
+func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
 	if !served && !namesClassBead {
@@ -597,8 +633,23 @@ func maybeRouteBdByID(cityPath string, bdArgs []string, stdout, stderr io.Writer
 	}
 	if !resolution.Found {
 		// Reserved-prefix id with no row: it has nowhere else to live.
+		//
+		// This runs BEFORE the --rig refusal below, and the order is the
+		// diagnosis. The refusal's whole claim is that the binding owns this
+		// bead and the named rig's work store does not hold it — a sentence
+		// that is false when nothing holds it. A mistyped reserved-prefix id
+		// under --rig is an id error, not a scope error, and blaming the flag
+		// sends the operator to fix the one thing that was not wrong.
 		printBdByIDNotFound(stderr, op.ID)
 		return 1, true
+	}
+	if rig := strings.TrimSpace(rigName); rig != "" {
+		// The invocation pins a WORK rig scope and names a bead the class
+		// binding owns. Both answers available here are wrong: serving it
+		// ignores a flag the operator reached for to be MORE specific, and
+		// honoring it sends the read to a ledger that does not hold the bead.
+		// So neither is taken. See refuseRigScopedClassOwnedTarget.
+		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
 	switch op.Verb {
 	case bdByIDShow:
@@ -618,6 +669,50 @@ func maybeRouteBdByID(cityPath string, bdArgs []string, stdout, stderr io.Writer
 	// so the passthrough would run a verb this build recognized against the one
 	// ledger that cannot hold the bead.
 	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", stderr)
+}
+
+// refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig
+// work scope with an explicit --rig while naming a bead the relocated class
+// binding owns.
+//
+// # The rule, and why it is a refusal rather than a narrowing
+//
+// --rig names a WORK scope: a rig's own bd workspace, one leg of the city's
+// work ledger. A relocated coordination class is not partitioned by rig — the
+// served split shape is storageSplitWhole, one binding for all five
+// infrastructure classes and every scope in the city — so there is nothing for
+// --rig to narrow WITHIN. The flag and the subject describe two different
+// ledgers, and the command has to say so.
+//
+// Both silent answers are worse:
+//
+//   - Serving it anyway ignores the flag, which is what this surface did before
+//     the rule: `gc bd show <class-id> --rig <rig>` and the same command with no
+//     --rig produced identical output. An operator who wrote --rig to be more
+//     specific got an answer from a store they did not name, with no
+//     diagnostic — and a script pinning --rig to keep two rigs apart was reading
+//     whichever ledger the class routing chose.
+//   - Honoring it routes the read at the rig's work store, which does not hold
+//     the bead. That is the pre-#5132 behavior and the wrong-answer lane this
+//     whole surface exists to close: an empty result indistinguishable from a
+//     real one.
+//
+// # What it does NOT cover
+//
+// Only the EXPLICIT flag. GC_RIG, -C/--directory and cwd detection are
+// auto-detected scope, not a deliberate one, and the controller sets GC_RIG on
+// every rig agent — refusing those would break the step-completion write the
+// core pack renders on every worked bead (`gc bd update <id> --set-metadata
+// gc.outcome=pass --status closed`, run from a rig worktree against a
+// class-owned step). resolveBdScopeTarget already keeps them in a lower
+// priority band than the flag for the same reason.
+//
+// --city is also untouched, and for the opposite reason: it selects WHICH CITY
+// answers, and the class binding this door opened is that city's. A --city
+// scope and class routing agree; a --rig scope and class routing cannot.
+func refuseRigScopedClassOwnedTarget(door bdByIDClassDoor, id, rigName string, stderr io.Writer) (int, bool) {
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, but --rig %s pins that rig's work store, which does not hold it; a relocated class is not partitioned by rig, so drop --rig (auto-detected scope — GC_RIG, -C, cwd — is not affected)\n", id, door.bindingName(), rigName) //nolint:errcheck // best-effort stderr
+	return 1, true
 }
 
 // refuseClassOwnedTarget is the single refusal message, so every unsupported
@@ -697,9 +792,16 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 //
 // An id is ADDRESSED when it is a positional token, or the value of a flag that
 // takes a bead id. It is merely QUOTED when it is the value of any other flag,
-// and a quoted id decides nothing: `gc bd list --metadata-field
-// workflow_id=gcg-…` is a work question about work rows, and refusing it
-// exec-fails the consumer that asks it.
+// and a quoted id decides nothing ABOUT OWNERSHIP: `gc bd list --metadata-field
+// workflow_id=gcg-…` selects work rows by a field they carry, so no bead of the
+// relocated class is being addressed and this walk returns false for it.
+//
+// False here does not mean forwarded. The selector dialect guard in
+// bd_relocated_classes.go runs first and refuses that same argv on servability
+// — a projection whose predicate names a namespace this ledger holds no row
+// under cannot answer it, and `[]` is a confident wrong answer. What this walk
+// must not do is claim OWNERSHIP from a quoted id, because that decides which
+// STORE serves the read, and a quoted id says nothing about that.
 //
 // The value/positional split comes from bdflags — the tree's own manifest of
 // what each subcommand's flags consume — rather than from a local list, so a

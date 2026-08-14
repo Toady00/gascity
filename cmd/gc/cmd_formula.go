@@ -627,7 +627,35 @@ With --attach on a v2 formula — one declaring
 [requires] formula_compiler = ">=2.0.0" — the invocation runs under a
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
-conflicting live workflow from the same source is an error.`,
+conflicting live workflow from the same source is an error.
+
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cityPath, err := resolveCity()
@@ -658,7 +686,14 @@ conflicting live workflow from the same source is an error.`,
 			// was handed on every city that relocates nothing, so a single-store
 			// cook runs against the one store it always did.
 			//
-			// The --attach arms are excluded — see the deferral comment on each.
+			// The --attach arms do not use this: a graft follows its PARENT,
+			// not its class, so they route by the attach bead's id instead —
+			// see attachStore below. Following the parent is only sound when
+			// the parent's store may hold graph-class beads, which in a split
+			// city's CITY scope means the binding; attachGraftClassRefusal is
+			// the gate that keeps the two rules from contradicting each other,
+			// and it asks the scope question first because a rig store holds
+			// its own graph-class beads and the relocation never moves it.
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
@@ -668,25 +703,92 @@ conflicting live workflow from the same source is an error.`,
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 				}
+				// A graft is a TWO-ENDED edge, so the arm that can serve it runs
+				// WHOLE against the store that holds the ATTACH BEAD, resolved
+				// by id — parent read, sub-DAG materialization and the blocking
+				// dep alike. That is what keeps the edge co-resident: move only
+				// the sub-DAG root and the other store records a `blocks` row
+				// naming an id it cannot resolve, which no backend rejects (bd
+				// passes a cross-prefix target through as an external ref;
+				// SQLite's deps table has no foreign key) and which every Ready
+				// implementation reads as a blocker that never clears. That is
+				// the dangling edge #5150 reproduced as "attach bead gc-1 is
+				// not Ready after the whole workflow closed", and it is not
+				// re-shipped here.
+				//
+				// The arm that can serve it is the V1 one. The graph.v2 arm
+				// cannot, and refuses — see the block on isGraphFormula below.
+				//
+				// Every city that relocates nothing, and every split city whose
+				// attach bead is work resident, gets back the exact store value
+				// resolveFormulaScope opened, so attachStore != store is
+				// precisely "the class binding holds this bead".
+				attachStore, err := classRoutedStoreForID(cityPath, attach, store)
+				if err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+				// The other half of co-residence, and it applies to BOTH arms:
+				// keeping the graft beside a WORK-resident attach bead keeps the
+				// edge resolvable and mints graph-class beads in the work
+				// ledger, which is a stranded write. Neither placement is
+				// expressible on a split city, so the graft is refused before
+				// either arm runs — see formula_cook_attach_class.go, ga-99xhy.
+				// The scope root travels with the store because relocation is a
+				// CITY-scope property: a rig store is never relocated, so a
+				// rig-scoped graft is co-resident and stays served.
+				if err := attachGraftClassRefusal(cityPath, scope.storeRoot, attach, store, attachStore); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
 				if isGraphFormula {
-					// NOT routed at the graph class, deliberately — the same
-					// deferral the legacy molecule.Attach arm below carries, for
-					// the same reason. A graft is a two-ended edge: the sub-DAG
-					// root is graph class, the attach bead is whatever class owns
-					// it, and ensureFormulaCookAttachDep writes a `blocks` row
-					// binding them. Move only the root and the work store records
-					// an edge naming an id it cannot resolve. No backend rejects
-					// that write (internal/beads/splittest documents both: bd
-					// passes a cross-prefix target through as an external ref,
-					// SQLite's deps table has no foreign key), and every Ready
-					// implementation treats an unresolvable blocker as open — so
-					// the caller's own work bead silently leaves Ready forever
-					// and the documented graft gate is void. Splitting it needs
-					// the attach bead's owning store resolved by id — the shared
-					// by-id class resolver, ga-k8pzw — plus a cross-boundary
-					// representation of the block, which is a production behavior
-					// change rather than wiring. Whole arm stays on the scope
-					// store until then, root and dep co-resident.
+					if attachStore != store {
+						// REFUSED, not routed, and not silently redirected: a
+						// graph.v2 invocation normalizes its target into an
+						// input convoy (PrepareInvocation ->
+						// NormalizeInputConvoy -> CreateSingleItemInputConvoy),
+						// and a synthetic input convoy is a WORK bead by
+						// explicit classification (coordclass.Classify). For an
+						// attach bead the class binding owns there is nowhere to
+						// put it:
+						//
+						//   - in the binding: a work-class bead born in the
+						//     infra ledger, which the migration's own equality
+						//     invariant says never happens — the rule
+						//     drainUnitConvoyStore states for the drain's unit
+						//     convoy, and graphv2's own
+						//     TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget
+						//     asserts for this one;
+						//   - in the work ledger: NormalizeInputConvoy cannot
+						//     read the target there at all, and the convoy's one
+						//     `tracks` edge to it is cross-class, which
+						//     convoy.TrackItemIn refuses with
+						//     ErrMemberNotCoResident even when the graph class
+						//     handle is named.
+						//
+						// So the missing piece is a cross-class MEMBERSHIP edge,
+						// which is a production mechanism rather than routing:
+						// ga-2orlf. Refusing costs nobody a capability — on a
+						// city without this routing the same invocation dies
+						// with "formulas v2 target <id> not found" — and the two
+						// alternatives are both silent: mis-homing the convoy,
+						// or emitting a run whose execution.work_associated is
+						// dropped because the projection's work leg reads a
+						// convoy the work ledger never held (DepList answers
+						// EMPTY there, not an error).
+						//
+						// The v1 arm below is unaffected and DOES serve this
+						// bead: PrepareInvocation returns before
+						// NormalizeInputConvoy for a non-graph formula, so it
+						// mints no convoy and the whole graft is co-resident.
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf(
+							"--attach %s: %s is owned by the relocated class binding, and a graph.v2 formula's synthetic input convoy is a work bead — it can live neither there (a work-class bead in the infra ledger) nor in the work ledger (its `tracks` edge to %s would be cross-class, which convoy.TrackItemIn refuses); grafting a graph.v2 formula onto a class-owned bead needs a cross-class membership edge: ga-2orlf. A v1 formula attaches to %s today",
+							attach, attach, attach, attach))
+					}
+					// Past both refusals — this one, and the class gate above
+					// that rejects a work-resident attach bead on a split city —
+					// only a single-store city reaches here. attachStore IS
+					// store, this arm runs on the one store it always did, and
+					// its execution-fact legs are the same value: the root, its
+					// steps and the input convoy are all minted here.
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					var syntheticInputConvoyID string
@@ -793,7 +895,12 @@ conflicting live workflow from the same source is an error.`,
 					return nil
 				}
 
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
+				// Non-graph formula: PrepareInvocation returns before
+				// NormalizeInputConvoy, so this call mints no input convoy and
+				// the store it is handed only has to be able to LOAD the
+				// formula. That is exactly why this arm can serve a class-owned
+				// attach bead when the graph.v2 arm above cannot.
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), attachStore, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -808,17 +915,19 @@ conflicting live workflow from the same source is an error.`,
 					graphRootKey = stampFormulaCookGraphV2Root(recipe, args[0], inv.InputConvoy, cookVars)
 				}
 
-				// NOT routed at the graph class, deliberately. molecule.Attach is a
-				// one-store operation that reads the attach bead, materializes the
-				// sub-DAG and writes the blocking dep through the SAME store, and
-				// on a split city those are two classes: the attach bead is
-				// whatever class owns it, while every sub-DAG bead is graph (Attach
-				// stamps the parent's gc.root_bead_id onto each step). Answering
-				// that needs the attach bead's owning store resolved by id — the
-				// shared by-id class resolver, ga-k8pzw — and a two-store Attach,
-				// which is a production behavior change rather than wiring. Left on
-				// the scope store until then.
-				result, err := molecule.Attach(cmd.Context(), store, recipe, attach, molecule.AttachOptions{
+				// molecule.Attach reads the attach bead, materializes the
+				// sub-DAG and writes the blocking dep through ONE store, so it
+				// is handed the one that HOLDS the attach bead. That is the
+				// whole of the two-store attach this arm can express: the edge
+				// stays co-resident, and the sub-DAG follows its parent rather
+				// than its class. See the attachStore comment above for the
+				// half that is still deferred.
+				//
+				// The execution-fact emit below stays on `store`: it resolves
+				// its own graph leg through resolveGraphStore, which already
+				// names the binding, and its work leg is only read for an input
+				// convoy this arm never mints.
+				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1342,6 +1451,18 @@ since it was spawned.`,
 			}
 
 			store, err := openStoreAtForCity(scope.storeRoot, cityPath)
+			if err != nil {
+				return err
+			}
+			// version-check's subject is a molecule/workflow bead, which is the
+			// graph class: on a city that relocates graph, every root this
+			// command is about is minted in the binding and the scope store has
+			// never held it. Reading it there reported "not found" for a live
+			// root — a by-id read answering about the wrong ledger, which is
+			// the same defect the `gc bd` by-id surface exists to close.
+			// classRoutedStoreForID returns the exact store value passed in on
+			// every city that relocates nothing.
+			store, err = classRoutedStoreForID(cityPath, beadID, store)
 			if err != nil {
 				return err
 			}

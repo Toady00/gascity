@@ -444,7 +444,11 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 	return &memoryOrderDispatcher{
 		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
-			return openStoreAtForCity(target.ScopeRoot, cityPath)
+			// Reuse cfg (rebuilt only on config reload/rescan — see
+			// CityRuntime.replaceOrderDispatcher) instead of re-parsing
+			// city.toml and all pack includes on every dispatch tick for
+			// every scope target (ga-237xpr).
+			return openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 		},
 		storageRoutes:        routes,
 		ep:                   ep,
