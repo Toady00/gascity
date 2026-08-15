@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -39,10 +38,12 @@ import (
 // dirty tables into Gas City's commit, and an already-clean working set is not
 // treated as a failure.
 
-// configCommitHarness builds a bash program exposing
+// configCommitHarness builds a shell program exposing
 // ensure_bd_runtime_config_value and its transitive dependencies, then invokes
-// it with the arguments the caller supplies via "$@".
-func configCommitHarness(t *testing.T) string {
+// it for one config key/value. The invocation is baked in rather than passed as
+// argv so the shared runShHarness runner can execute it, keeping this file off
+// the untagged subprocess census.
+func configCommitHarness(t *testing.T, key, value string) string {
 	t.Helper()
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
@@ -79,7 +80,9 @@ func configCommitHarness(t *testing.T) string {
 	// than on a missing-function harness error.
 	harness.WriteString(optionalShellFunction(script, "commit_bd_runtime_config"))
 	harness.WriteString("\n")
-	harness.WriteString("ensure_bd_runtime_config_value \"$@\"\n")
+	harness.WriteString("ensure_bd_runtime_config_value " +
+		shellSingleQuote(configCommitTestDatabase) + " " +
+		shellSingleQuote(key) + " " + shellSingleQuote(value) + "\n")
 	return harness.String()
 }
 
@@ -124,7 +127,9 @@ const configCommitTestDatabase = "rigdb"
 
 // runEnsureConfigValue runs the harness for one config key/value write and
 // returns the combined output plus every SQL query the stub dolt received.
-func runEnsureConfigValue(t *testing.T, key, value string, env ...string) (string, []string, error) {
+// It routes through the shared runShHarness runner, which fails the test if the
+// harness itself exits non-zero.
+func runEnsureConfigValue(t *testing.T, key, value string, env ...string) (string, []string) {
 	t.Helper()
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
@@ -134,15 +139,14 @@ func runEnsureConfigValue(t *testing.T, key, value string, env ...string) (strin
 	writeConfigCommitFakeDolt(t, binDir)
 
 	harnessPath := filepath.Join(dir, "harness.sh")
-	writeExecutable(t, harnessPath, configCommitHarness(t))
+	writeExecutable(t, harnessPath, configCommitHarness(t, key, value))
 
 	logPath := filepath.Join(dir, "dolt.log")
-	cmd := exec.Command("bash", harnessPath, configCommitTestDatabase, key, value)
-	cmd.Env = append([]string{
+	harnessEnv := append([]string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"FAKE_DOLT_LOG=" + logPath,
 	}, env...)
-	out, err := cmd.CombinedOutput()
+	out := runShHarness(t, harnessPath, "ensure_bd_runtime_config_value", harnessEnv)
 
 	var queries []string
 	if data, readErr := os.ReadFile(logPath); readErr == nil {
@@ -152,17 +156,14 @@ func runEnsureConfigValue(t *testing.T, key, value string, env ...string) (strin
 			}
 		}
 	}
-	return string(out), queries, err
+	return string(out), queries
 }
 
 // TestEnsureBdRuntimeConfigValueCommitsTheWrite is the regression guard for
 // Gas City leaving issue_prefix permanently uncommitted in every provisioned
 // database.
 func TestEnsureBdRuntimeConfigValueCommitsTheWrite(t *testing.T) {
-	out, queries, err := runEnsureConfigValue(t, "issue_prefix", "sctforg")
-	if err != nil {
-		t.Fatalf("ensure_bd_runtime_config_value failed: %v\n%s", err, out)
-	}
+	_, queries := runEnsureConfigValue(t, "issue_prefix", "sctforg")
 
 	joined := strings.Join(queries, "\n")
 	if !strings.Contains(joined, "INSERT INTO config") {
@@ -180,10 +181,7 @@ func TestEnsureBdRuntimeConfigValueCommitsTheWrite(t *testing.T) {
 // the config table. A blanket DOLT_ADD('.') / DOLT_COMMIT('-Am') would sweep
 // unrelated dirty tables into Gas City's commit and drift the database hash.
 func TestEnsureBdRuntimeConfigValueCommitScopedToConfigTable(t *testing.T) {
-	_, queries, err := runEnsureConfigValue(t, "issue_prefix", "sctforg")
-	if err != nil {
-		t.Fatalf("ensure_bd_runtime_config_value failed: %v", err)
-	}
+	_, queries := runEnsureConfigValue(t, "issue_prefix", "sctforg")
 
 	var commitQuery string
 	for _, q := range queries {
@@ -208,10 +206,7 @@ func TestEnsureBdRuntimeConfigValueCommitScopedToConfigTable(t *testing.T) {
 // TestEnsureBdRuntimeConfigValueCommitsCustomTypes covers the second caller,
 // ensure_bd_runtime_custom_types, which funnels through the same helper.
 func TestEnsureBdRuntimeConfigValueCommitsCustomTypes(t *testing.T) {
-	_, queries, err := runEnsureConfigValue(t, "types.custom", "molecule,convoy,session")
-	if err != nil {
-		t.Fatalf("ensure_bd_runtime_config_value failed: %v", err)
-	}
+	_, queries := runEnsureConfigValue(t, "types.custom", "molecule,convoy,session")
 	joined := strings.Join(queries, "\n")
 	if !strings.Contains(joined, "DOLT_COMMIT") {
 		t.Fatalf("types.custom write was never committed; queries:\n%s", joined)
@@ -222,11 +217,8 @@ func TestEnsureBdRuntimeConfigValueCommitsCustomTypes(t *testing.T) {
 // re-run: the value is already present and committed, so Dolt refuses an empty
 // commit. That must not fail provisioning.
 func TestEnsureBdRuntimeConfigValueToleratesNothingToCommit(t *testing.T) {
-	out, queries, err := runEnsureConfigValue(t, "issue_prefix", "sctforg",
+	_, queries := runEnsureConfigValue(t, "issue_prefix", "sctforg",
 		"FAKE_DOLT_COMMIT_OUTPUT=Error: nothing to commit")
-	if err != nil {
-		t.Fatalf("an empty commit must not fail provisioning: %v\n%s", err, out)
-	}
 	if len(queries) == 0 {
 		t.Fatal("expected the stub dolt to receive queries")
 	}
@@ -236,11 +228,8 @@ func TestEnsureBdRuntimeConfigValueToleratesNothingToCommit(t *testing.T) {
 // swallowing a genuine commit error: provisioning stays fail-open (the value
 // is already written) but the operator must be told the working set is dirty.
 func TestEnsureBdRuntimeConfigValueReportsCommitFailure(t *testing.T) {
-	out, _, err := runEnsureConfigValue(t, "issue_prefix", "sctforg",
+	out, _ := runEnsureConfigValue(t, "issue_prefix", "sctforg",
 		"FAKE_DOLT_COMMIT_OUTPUT=Error: connection refused")
-	if err != nil {
-		t.Fatalf("a commit failure must not abort provisioning: %v\n%s", err, out)
-	}
 	if !strings.Contains(out, "connection refused") {
 		t.Errorf("commit failure must be surfaced to the operator, got: %q", out)
 	}
