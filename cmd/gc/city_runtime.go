@@ -360,6 +360,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// NOTE: the routes are NOT registered as this city's residency answer here.
+	// Construction happens before the supervisor knows whether it can take the
+	// controller lock, and a replacement that loses it would have repointed the
+	// live city's release sweeps at a binding it is about to close. The lock
+	// holder registers — see registerResidencyRoutes.
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
@@ -2446,6 +2451,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	} else {
 		phaseStart = time.Now()
 		if sweepUndesiredPoolSessionBeads(
+			cr.cityPath,
 			sessStore,
 			rigStores,
 			sessionBeads,
@@ -2486,7 +2492,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.recordReconcileTraceInputs(trace, openInfos, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.filter_assigned_work_for_wake", phaseStart, map[string]any{
 		"assigned_work_bead_count":       len(assignedWorkBeads),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
@@ -2598,6 +2604,27 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 				result.SessionQueryPartial ||
 				result.ContinuationClaimQueryPartial,
 			time.Now(),
+			cr.stdout,
+		)
+		// The claim-without-execution lane. Both backstops above end at the
+		// claim; this one starts there. It reads the UNFILTERED assigned-work
+		// triple, which is the only index-aligned (bead, store, ref) view in the
+		// tick — the release filter above rewrites beads and refs but not stores
+		// — and re-checks ownership against each session's own identities anyway,
+		// so a released bead (whose assignee resolves to no live session by
+		// construction) cannot match a running one.
+		nudgeStalledPoolExecution(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.AssignedWorkBeads,
+			result.AssignedWorkStores,
+			result.AssignedWorkStoreRefs,
+			result.StoreQueryPartial || result.SessionQueryPartial,
+			time.Now(),
+			cr.rec,
+			cr.requestExecutionStalledDrain,
 			cr.stdout,
 		)
 	}
@@ -2929,6 +2956,7 @@ func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[str
 }
 
 func sweepUndesiredPoolSessionBeads(
+	cityPath string,
 	store beads.SessionStore,
 	rigStores map[string]beads.Store,
 	sessionBeads *sessionBeadSnapshot,
@@ -3037,7 +3065,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(GCSweepSessionBeads(store.Store, rigStores, candidates))
+	return len(GCSweepSessionBeads(cityPath, store.Store, rigStores, candidates))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
@@ -3540,11 +3568,31 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	return scaleCheckDemandMinInterval
 }
 
+// readyDemandSnapshotFingerprint hashes the ready sets of every store the
+// demand probe reads, so a write anywhere in that set invalidates the cached
+// demand snapshot instead of letting it be reused for up to its max age.
+//
+// "Every store the probe reads" is the load-bearing part. The fingerprint hashed
+// the work store and the rigs; the probe's LEADING leg is the sessions-class
+// store, which on a converged split city is the graph binding — the store that
+// holds every routed graph step. So a step claimed or closed in the binding
+// changed nothing the fingerprint could see, and the controller went on
+// asserting demand for it for the rest of the snapshot window: phantom demand,
+// spawning seats for work that was already taken.
 func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 	stores := []struct {
 		ref   string
 		store beads.Store
 	}{{ref: cr.cityName, store: cr.cityBeadStore()}}
+	// The demand probe's leading leg. Deduped by store identity: on a city that
+	// relocates nothing this IS the work store already hashed above, and hashing
+	// it twice would only double the read.
+	if sessions := cr.sessionsBeadStore().Store; !sameFingerprintStore(sessions, stores[0].store) {
+		stores = append(stores, struct {
+			ref   string
+			store beads.Store
+		}{ref: "class:sessions", store: sessions})
+	}
 	rigStores := cr.rigBeadStores()
 	refs := make([]string, 0, len(rigStores))
 	for ref := range rigStores {
@@ -3583,6 +3631,21 @@ func (cr *CityRuntime) readyDemandSnapshotFingerprint() string {
 		}
 	}
 	return fmt.Sprintf("%x", h.Sum64())
+}
+
+// sameFingerprintStore reports whether two store handles are the same underlying
+// store, so the demand fingerprint reads each distinct store exactly once. It is
+// pointer identity — the same question workAssignmentStoresHave asks — because a
+// city that relocates nothing serves several coordination classes from one store
+// value, and a city that relocates them serves the sessions class from a
+// genuinely different one.
+func sameFingerprintStore(a, b beads.Store) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	aKey, aOK := storePointerKey(a)
+	bKey, bOK := storePointerKey(b)
+	return aOK && bOK && aKey == bKey
 }
 
 func writeReadyDemandFingerprintBead(w io.Writer, bead beads.Bead) {
@@ -3797,6 +3860,12 @@ func (cr *CityRuntime) shutdown() {
 		// process that exits holding it leaves the successor's open racing this
 		// one's.
 		defer func() {
+			// Stop naming these routes before closing them: a sweep that
+			// resolved its bindings from a closed handle would answer every leg
+			// with an error instead of falling back to the one-shot funnel.
+			// Passing our OWN routes is what keeps this from dropping a
+			// registration a live replacement already installed.
+			unregisterResidencyRoutes(cr.cityPath, cr.storageRoutes)
 			if err := cr.storageRoutes.close(); err != nil {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
