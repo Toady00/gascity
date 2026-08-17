@@ -165,6 +165,8 @@ const (
 	RigRootMetadataKey                   = "gc.rig_root"
 	RootBeadIDMetadataKey                = "gc.root_bead_id"
 	RootStoreRefMetadataKey              = "gc.root_store_ref"
+	RouteQuarantineMetadataKey           = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey     = "gc.route_recovery_quarantine_reason"
 	RoutedToMetadataKey                  = "gc.routed_to"
 	RunTargetMetadataKey                 = "gc.run_target"
 	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
@@ -415,6 +417,8 @@ var KnownMetadataKeys = []string{
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
 	RootStoreRefMetadataKey,
+	RouteQuarantineMetadataKey,
+	RouteQuarantineReasonMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,

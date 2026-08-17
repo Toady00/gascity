@@ -131,6 +131,22 @@ type CityRuntime struct {
 	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
+	// routeRecovery is the route-repair lane: an event-fed delta pass in the
+	// tick and a cadenced authoritative scan behind it. Created on first use so
+	// a directly-constructed runtime needs no wiring.
+	routeRecovery     *routeRecoveryLane
+	routeRecoveryOnce sync.Once
+
+	// completions is the graph.v2 completion-fact lane, the same delta/sweep
+	// split as routeRecovery.
+	completions     *completionsLane
+	completionsOnce sync.Once
+
+	// detachedOrphan is the detached-handoff-orphan lane, the same delta/scan
+	// split applied to the sweep that was 48.5% of the tick (ga-l7jdg).
+	detachedOrphan     *detachedOrphanLane
+	detachedOrphanOnce sync.Once
+
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
@@ -635,6 +651,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// post-restart rig re-enters pool demand without a manual `gc sling`
 	// (ga-n2d.4). Placed before the expensive reconcile for the same reason as
 	// startup-orders: routed demand should not wait behind cold-start drift work.
+	//
+	// The journal feed is armed FIRST, then the startup scan runs. The feed
+	// watches from the journal head at the moment it starts, so arming it before
+	// the scan makes the two overlap: everything older than the head is the
+	// scan's to repair and everything newer is the delta lane's. Arming it after
+	// would leave the scan's own duration as a hole no lane is watching. The
+	// overlap costs nothing — both passes are idempotent.
+	cr.startTickDeltaLanes(ctx, cr.routeRecoveryEventProvider())
+	// This is the lane's startup backstop, and it is the LAST full scan on the
+	// critical path: from here the tick sees only the event-fed delta pass, and
+	// the authoritative scan runs on cadence in the background lane.
 	startupRouteRecoveryStart := time.Now()
 	cr.safeTick(func() {
 		cr.recoverUnroutedWorkRoutes()
@@ -1191,10 +1218,24 @@ func (cr *CityRuntime) tick(
 	// Re-route ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty), so the autoscaler — which keys on
 	// gc.routed_to — sees it as demand without a manual `gc sling` (ga-n2d.4).
-	// Runs in the cheap dispatch phase before the expensive session reconcile.
+	//
+	// The tick runs the DELTA half only: the beads the event feed named since
+	// the last pass, and nothing else. A steady tick names nothing and reads no
+	// store at all. The authoritative full scan this replaced was 185.3s of a
+	// ~360s tick (ga-l7jdg) and now runs off-tick in the backstop lane.
 	phaseStart = time.Now()
-	cr.recoverUnroutedWorkRoutes()
-	recordPhase(TraceSiteControllerTickPhase, "recover_unrouted_work_routes", phaseStart, nil)
+	routeReport := cr.recoverUnroutedWorkRoutesDelta()
+	if trace != nil {
+		// The convergence lane runs on a background goroutine, so the tick's
+		// record is where its age becomes visible: `gc trace` answers "when did
+		// the backstop last converge, and why was it due" without an operator
+		// having to find the log line.
+		routeFields := routeReport.fields()
+		backstopAt, backstopReason, backstopRan := cr.routeRecoveryLaneOf().lastBackstop()
+		addBackstopAgeFields(routeFields, backstopAt, backstopReason, backstopRan)
+		trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, routeReport.outcome(),
+			"recover_unrouted_work_routes", time.Since(phaseStart), routeFields)
+	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -1347,13 +1388,28 @@ func (cr *CityRuntime) tick(
 		cr.beadReconcileTick(ctx, result, sessionBeads, trace, false)
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(result))
 	}
-	// Graph stores intentionally do not emit bead.closed. Reconcile their
-	// closed graph.v2 steps only at the authoritative patrol cadence, not on
-	// event-driven ticks, so lifecycle recovery remains bounded and idempotent.
-	if trigger == "patrol" && cr.cs != nil {
+	// Graph stores intentionally do not emit bead.closed, so a step closed
+	// between the durable write and the best-effort journal append would be a
+	// permanent lifecycle gap. The tick repairs only the roots the journal named
+	// since the last pass; the whole-corpus convergence sweep runs off-tick in
+	// the background lane.
+	//
+	// The old gate here was `trigger == "patrol"`, which is not a cadence: under
+	// overload every surviving ticker fire IS a patrol trigger, so the full pass
+	// ran on every tick and cost 72.4s of it (ga-l7jdg).
+	if cr.cs != nil {
 		phaseStart = time.Now()
-		cr.cs.reconcileExecutionCompletions()
-		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, nil)
+		completionsLane := cr.completionsLaneOf()
+		namedRoots := completionsLane.takePending()
+		emitted := cr.cs.reconcileExecutionCompletionsDelta(namedRoots)
+		completionFields := map[string]any{
+			"lane":        "delta",
+			"named_roots": len(namedRoots),
+			"emitted":     emitted,
+		}
+		sweptAt, sweptReason, swept := completionsLane.lastSweep()
+		addBackstopAgeFields(completionFields, sweptAt, sweptReason, swept)
+		recordPhase(TraceSiteControllerTickPhase, "reconcile_execution_completions", phaseStart, completionFields)
 	}
 
 	// Wisp GC: purge expired closed molecules. The molecule/wisp/workflow purge
@@ -2387,6 +2443,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
 	}
+	// Detached handoff orphans: the tick repairs only the beads the journal named
+	// since the last pass. The whole-corpus scan this replaced was a live
+	// open-corpus read of the city ledger and every rig, serially, on every tick
+	// — 180.8s of a 373s tick with restored_count=0 on every one (ga-l7jdg). It
+	// now runs off-tick on the convergence lane's cadence.
+	phaseStart = time.Now()
+	detachedReport := cr.sweepDetachedHandoffOrphansDelta()
+	detachedFields := detachedReport.fields()
+	sweptAt, sweptReason, swept := cr.detachedOrphanLaneOf().lastBackstop()
+	addBackstopAgeFields(detachedFields, sweptAt, sweptReason, swept)
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_detached_handoff_orphans", phaseStart, detachedFields)
 	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
 	// this city's managed port returns zero demand, indistinguishable from a
 	// genuinely-idle fleet — and would drain every running pool. This runs on

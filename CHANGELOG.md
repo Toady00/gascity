@@ -22,6 +22,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
   streaming output instead of buffering it. (gascity#4823)
 
+- **`GET /runs/{id}/steps` returns steps in topological (pipeline) order, not
+  arbitrary fold order.** No level of the read chain — the handler, the
+  member-bead projection, or the run projection fold — applied any sort, so
+  the Runs dashboard's Formula Graph rendered a run's steps in whatever order
+  the projection happened to yield, unreadable as a pipeline. Steps are now
+  topologically sorted on each member's real dependency edges (`Dependencies`
+  and `Needs`), with a deterministic bead-ID tiebreak for independent steps
+  and steps carrying no dependency data. (gascity#4699)
+
+- **`check-core-boundary.sh` no longer false-positives on an in-tree Go
+  build cache.** The `org_` boundary scan walked the whole working tree
+  (`grep -r --exclude-dir=vendor --exclude-dir=testdata`), so any untracked
+  in-tree Go module cache tripped false violations on third-party module
+  sources — the common case is GitLab CI's canonical
+  `$CI_PROJECT_DIR/.cache/go-mod` layout. The scan now runs over
+  `git ls-files` instead, so an untracked cache or build-artifact directory
+  is invisible to it regardless of name, while vendor/testdata (tracked or
+  not) stay excluded as before. (gascity#4479)
+
+- **`gc status` no longer pays a full event-log scan for a cosmetic field.**
+  `storehealth.LastMaintenance` now prefers the `TailProvider` backward-scan
+  fast path over an unbounded forward `List` when the provider supports it,
+  and a new `Filter.MaxScanBytes` bounds that backward scan so a rare or
+  never-emitted event type (the common case: a city that has never run store
+  maintenance) can no longer force a full-file walk just to populate the
+  `Last GC:` status line. Previously this cost two full scans of
+  `events.jsonl` on every `gc status` call, dominating latency on large event
+  logs and surfacing as a spurious "runtime status probe timed out" warning.
+
+  Operator note: `Last GC:` may now be absent on a busy city even though
+  maintenance has run. The tail scan looks back a bounded 8 MiB, and it reads
+  only the active `events.jsonl` — never the rotated `.gz` archives — so a
+  maintenance event that has aged out of the window, or out of the active file
+  entirely, is reported as absent rather than stale. The field is display-only
+  and nothing gates on it. `gc maintenance status` is the fallback, with one
+  caveat: it reads the supervisor's in-memory run history, so it requires a
+  running supervisor and resets when the supervisor restarts. It is a live
+  view, not an equivalent durable source; for durable history, query the event
+  log for `store.maintenance.*` directly. (gascity#4418)
+
+- **`gc formula cook --attach`'s help text no longer claims a parent-child
+  relationship it never creates.** `--attach=<bead-id>` has only ever added
+  a `blocks` dependency from the attached bead to the sub-DAG root
+  (`ensureFormulaCookAttachDep` / `molecule.Attach` both call
+  `store.DepAdd(..., "blocks")`, never setting `ParentID`), but the long
+  help described it as creating the sub-DAG "as children of the given
+  bead." Since convoy auto-close watches parent-child children, not
+  `blocks` dependents, a user following the old description would wrongly
+  expect an attached sub-DAG's completion to trigger the attached convoy's
+  auto-close — it never does. Help text now describes the actual `blocks`
+  -only relationship and says so explicitly (gastownhall/gascity#2392).
+
+- **`gc stop --help` and `gc stop --json` now state what actually happens to
+  a supervisor-managed city's registration.** `gc stop` has always
+  unregistered a supervisor-managed city as part of stopping it, but neither
+  the CLI help nor the `--json` output said so — a user reading "Stop all
+  agent sessions in the city" reasonably expected `gc start` to find the
+  city again later. Help text now documents the unregister behavior and
+  points at `gc register`/`gc unregister` for the split operations; the
+  `--json` envelope gained an `unregistered` field reporting whether this
+  stop also removed the supervisor registration (gastownhall/gascity#4366).
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report
