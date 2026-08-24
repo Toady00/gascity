@@ -405,7 +405,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(content, "INJECTION_TIMEOUT_MS") ||
 		!hookContains(content, "Promise.all([") ||
 		// Consumptive queue draining must be scoped to a turn (#5552).
-		!hookContains(content, "drainedTurnID") {
+		!hookContains(content, "drainedTurnID") ||
+		// The child's stdin must be closed or gc blocks on it (#5562).
+		!hookContains(content, "pending.child.stdin?.end();") {
 		return true
 	}
 	for _, marker := range []string{
