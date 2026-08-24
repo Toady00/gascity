@@ -164,6 +164,18 @@ async function mirrorTranscript(directory, client, sessionID) {
 
 export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
+  // experimental.chat.system.transform fires once per model generation, not
+  // once per user turn: OpenCode triggers it from Agent.generate, so a turn
+  // that dispatches subagents runs the prefix build several times. Draining a
+  // consumptive queue there means the queue is emptied repeatedly and the
+  // drained items land in whichever generation happened to win the race.
+  //
+  // Track the turn a user message opened and let the consumptive commands run
+  // once per turn. When no turn is known — events not delivered, or a payload
+  // without the fields below — this falls back to the previous behavior of
+  // running them every time, so nudges are never silently withheld.
+  let currentTurnID = "";
+  let drainedTurnID = null;
 
   async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
@@ -178,6 +190,12 @@ export default async function gascityPlugin({ directory, client }) {
 
   async function buildPrefix() {
     const prime = await readPrime();
+    if (currentTurnID && drainedTurnID === currentTurnID) {
+      return prime;
+    }
+    // Claim the turn before awaiting so concurrent generations cannot both
+    // reach the drain.
+    drainedTurnID = currentTurnID;
     const [nudges, mail] = await Promise.all([
       runOptional(directory, "nudge", "drain", "--inject"),
       runOptional(directory, "mail", "check", "--inject"),
@@ -196,8 +214,17 @@ export default async function gascityPlugin({ directory, client }) {
             await mirrorTranscript(directory, client, sessionID);
           }
           return;
-        case "session.idle":
         case "message.updated":
+          {
+            // A new user message opens a turn.
+            const info = event?.properties?.info;
+            if (info && info.role === "user" && info.id) {
+              currentTurnID = String(info.id);
+            }
+          }
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
+          return;
+        case "session.idle":
           await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
         default:

@@ -1762,6 +1762,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"drainedTurnID",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		"INJECTION_TIMEOUT_MS",
@@ -2220,12 +2221,14 @@ GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 INJECTION_TIMEOUT_MS;
 Promise.all([]);
+drainedTurnID;
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
 	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
+	unscopedDrain := bytes.Replace(current, []byte("drainedTurnID;\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2244,6 +2247,9 @@ Promise.all([]);
 	}
 	if !opencodeHookNeedsUpgrade(serialInjection) {
 		t.Fatal("OpenCode hook without concurrent optional injection did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(unscopedDrain) {
+		t.Fatal("OpenCode hook without turn-scoped queue draining did not request upgrade")
 	}
 }
 

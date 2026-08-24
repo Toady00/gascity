@@ -403,7 +403,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// Optional injection must be bounded and concurrent (#5553).
 		!hookContains(content, "INJECTION_TIMEOUT_MS") ||
-		!hookContains(content, "Promise.all([") {
+		!hookContains(content, "Promise.all([") ||
+		// Consumptive queue draining must be scoped to a turn (#5552).
+		!hookContains(content, "drainedTurnID") {
 		return true
 	}
 	for _, marker := range []string{
