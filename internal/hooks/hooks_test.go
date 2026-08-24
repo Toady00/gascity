@@ -1766,7 +1766,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
-		"INJECTION_TIMEOUT_MS",
 		"Promise.all([",
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
@@ -2222,7 +2221,6 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
-INJECTION_TIMEOUT_MS;
 Promise.all([]);
 drainedTurnID;
 pending.child.stdin?.end();

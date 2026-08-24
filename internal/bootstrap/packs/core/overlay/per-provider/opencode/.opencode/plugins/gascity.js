@@ -27,36 +27,18 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const GC_OPENCODE_HOOK_VERSION = 6;
 const GC_BIN = process.env.GC_BIN || "gc";
-// Optional per-turn injection (queued nudges, unread mail) is best effort, so
-// it gets its own fail-open budget rather than the 30s default used for
-// lifecycle work such as prime and handoff. A stalled optional command drops
-// its contribution for that turn instead of stalling the turn; the items are
-// leased rather than consumed, so a later pass redelivers them.
-//
-// Sized from measurement, not from a latency target. Against a live city the
-// floor for one gc invocation (startup, config load, store connect, target
-// resolve) is ~800ms and `gc prime --hook` runs ~1.5s, so the budget has to
-// clear a couple of seconds of legitimate work plus acknowledgement
-// round-trips. 5s is roughly 6x the observed floor while staying 6x tighter
-// than the lifecycle default.
-//
-// Override with GC_OPENCODE_INJECTION_TIMEOUT_MS for a slower store.
-const INJECTION_TIMEOUT_MS = (() => {
-  const override = Number(process.env.GC_OPENCODE_INJECTION_TIMEOUT_MS);
-  return Number.isFinite(override) && override > 0 ? override : 5000;
-})();
+// Every gc call this plugin makes shares one timeout. Optional per-turn
+// injection used to carry a shorter budget of its own, but that was justified
+// only while it blocked the send acknowledgement; it no longer does, and the
+// stalls it was hedging against were an unclosed child stdin rather than slow
+// work.
+const COMMAND_TIMEOUT_MS = 30000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
-async function runCommand(
-  directory,
-  args,
-  warnOnFailure,
-  extraEnv = {},
-  timeout = 30000,
-) {
+async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   const startedAt = Date.now();
   try {
     // execFile always gives the child a stdin pipe and never closes it, so a
@@ -68,7 +50,7 @@ async function runCommand(
     const pending = execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
-      timeout,
+      timeout: COMMAND_TIMEOUT_MS,
       env: {
         ...process.env,
         ...extraEnv,
@@ -81,17 +63,10 @@ async function runCommand(
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err, Date.now() - startedAt, timeout);
+      logRunFailure(args, directory, err, Date.now() - startedAt, COMMAND_TIMEOUT_MS);
     }
     return "";
   }
-}
-
-// Optional injection: short budget, fails open, but still reports why. The
-// failure used to be swallowed entirely, which left no way to tell which
-// command stalled a turn.
-async function runOptional(directory, ...args) {
-  return runCommand(directory, args, true, {}, INJECTION_TIMEOUT_MS);
 }
 
 async function runWithWarning(directory, ...args) {
@@ -227,8 +202,8 @@ export default async function gascityPlugin({ directory, client }) {
     // reach the drain.
     drainedTurnID = currentTurnID;
     const [nudges, mail] = await Promise.all([
-      runOptional(directory, "nudge", "drain", "--inject"),
-      runOptional(directory, "mail", "check", "--inject"),
+      runWithWarning(directory, "nudge", "drain", "--inject"),
+      runWithWarning(directory, "mail", "check", "--inject"),
     ]);
     return [prime, nudges, mail].filter(Boolean).join("\n\n");
   }
