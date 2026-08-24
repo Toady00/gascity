@@ -1764,6 +1764,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"const GC_OPENCODE_HOOK_VERSION = 6",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
+		"INJECTION_TIMEOUT_MS",
+		"Promise.all([",
 		`"experimental.session.compacting"`,
 		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"output.context.push(handoff)",
@@ -2216,11 +2218,14 @@ runWithWarning(directory, "handoff", "--auto", "context cycle");
 output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+INJECTION_TIMEOUT_MS;
+Promise.all([]);
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
+	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2236,6 +2241,9 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 	}
 	if !opencodeHookNeedsUpgrade(withChatMessage) {
 		t.Fatal("OpenCode hook still registering chat.message did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(serialInjection) {
+		t.Fatal("OpenCode hook without concurrent optional injection did not request upgrade")
 	}
 }
 
