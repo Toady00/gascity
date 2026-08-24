@@ -35,7 +35,7 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 8
-	managedOpenCodeHookVersion = 5
+	managedOpenCodeHookVersion = 6
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
@@ -407,6 +407,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		`run(directory, "handoff", "context cycle")`,
 		`"session", "reset"`,
 		`"session.deleted"`,
+		// OpenCode awaits chat.message before persisting the user message, so
+		// injecting from it delays the send acknowledgement (#5551).
+		`"chat.message"`,
 	} {
 		if hookContains(content, marker) {
 			return true
