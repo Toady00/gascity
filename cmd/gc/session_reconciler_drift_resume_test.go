@@ -477,7 +477,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 	}
 	if _, err := startPreparedStartCandidate(
 		context.Background(), *prepared, "", env.store, env.sp, cfg, nil,
-		immediateSessionStaleKeyDetectionWaiter,
+		immediateSessionStaleKeyDetectionWaiter, nil,
 	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
 	}
