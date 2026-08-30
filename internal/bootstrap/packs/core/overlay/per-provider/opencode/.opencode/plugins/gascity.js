@@ -41,7 +41,13 @@ const PATH_PREFIX =
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   const startedAt = Date.now();
   try {
-    const { stdout, stderr } = await execFileAsync(GC_BIN, args, {
+    // execFile always gives the child a stdin pipe and never closes it, so a
+    // gc subcommand that reads hook stdin waits for an EOF that never arrives
+    // and is killed when the timeout expires. Close it immediately: these
+    // calls send nothing on stdin. (`stdio` is not an execFile option — it is
+    // honored by spawn and execFileSync, which is why the pi hook can pass
+    // stdio: ["ignore", ...] instead.)
+    const pending = execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
       timeout: COMMAND_TIMEOUT_MS,
@@ -51,6 +57,8 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
         PATH: PATH_PREFIX + (process.env.PATH || ""),
       },
     });
+    pending.child.stdin?.end();
+    const { stdout, stderr } = await pending;
     logRunStderr(stderr);
     return stdout.trim();
   } catch (err) {

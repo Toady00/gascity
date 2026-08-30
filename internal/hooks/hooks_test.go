@@ -1763,6 +1763,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 6",
 		"drainedTurnID",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		"Promise.all([",
@@ -2183,6 +2184,7 @@ export default async function gascityPlugin() {
 	}
 	for _, want := range []string{
 		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2220,6 +2222,7 @@ GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 Promise.all([]);
 drainedTurnID;
+pending.child.stdin?.end();
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
@@ -2227,6 +2230,7 @@ drainedTurnID;
 	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
 	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
 	unscopedDrain := bytes.Replace(current, []byte("drainedTurnID;\n"), nil, 1)
+	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2248,6 +2252,9 @@ drainedTurnID;
 	}
 	if !opencodeHookNeedsUpgrade(unscopedDrain) {
 		t.Fatal("OpenCode hook without turn-scoped queue draining did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(openStdin) {
+		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
 	}
 }
 
