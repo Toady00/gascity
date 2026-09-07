@@ -31,7 +31,8 @@ func PreserveManagedFile(relPath string, existing []byte) bool {
 	if !ok {
 		return false
 	}
-	needsUpgrade := overlayManagedNeedsUpgrade(provider, filepath.Clean(relPath))
+	// These versioned hooks do not need desired bytes; Cursor's JSON upgrade does.
+	needsUpgrade := overlayManagedNeedsUpgrade(provider, filepath.Clean(relPath), nil)
 	if needsUpgrade == nil {
 		return false
 	}

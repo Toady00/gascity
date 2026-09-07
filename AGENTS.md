@@ -450,10 +450,18 @@ concurrent builds.
 **Hermetic Git test config is mirrored.** `Makefile`'s `TEST_ENV` and the
 nested `env -i` wrappers in `scripts/test-local-parallel`,
 `scripts/test-go-test-shard`, and `scripts/test-integration-shard` must all pin
-`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Updating only the
+`GIT_CONFIG_NOSYSTEM=1` and the writable config from `scripts/test-gitconfig-path`. Updating only the
 Makefile is insufficient because each nested runner rebuilds the environment
 and would otherwise restore user Git configuration through the preserved
 `HOME`.
+
+Integration merge checks: `PreserveManagedFile` calls the same upgrade selector
+as installation, but its path map contains only versioned hooks. The selector's
+desired bytes are needed for Cursor JSON, not those hooks. Keep the caller in
+sync when upstream changes the selector signature. Graph-anchor work-query
+fallbacks must also retain the canonical singleton's named-origin admission
+and the assigned/routed message exclusions; regenerate all work-query goldens
+after combining those changes.
 
 ## Rebuilding bd alongside a local gc release
 
