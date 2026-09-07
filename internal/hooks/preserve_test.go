@@ -50,6 +50,23 @@ func TestPreserveManagedFileReplacesStalePlugin(t *testing.T) {
 	}
 }
 
+func TestInstallOpenCodeHookUpgradesVersion7(t *testing.T) {
+	current := installedOpenCodePlugin(t)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	fs := fsys.NewFake()
+	const path = "/work/.opencode/plugins/gascity.js"
+	fs.Files[path] = stale
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[path]; !bytes.Equal(got, current) || opencodeHookVersion(string(got)) != 8 {
+		t.Fatal("version 7 plugin was not upgraded to the current version 8 plugin")
+	}
+	if !bytes.Equal(fs.Files[path+".bak"], stale) {
+		t.Fatal("version 7 plugin was not backed up")
+	}
+}
+
 // Anything not recognized as a managed hook file stages exactly as before.
 func TestPreserveManagedFileIgnoresUnmanagedPaths(t *testing.T) {
 	for _, rel := range []string{

@@ -1778,7 +1778,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 7",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"drainedTurnID",
 		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
@@ -2206,7 +2206,7 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 7",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
@@ -2230,7 +2230,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 7;
+const GC_OPENCODE_HOOK_VERSION = 8;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2250,8 +2250,8 @@ drainedTurnID;
 pending.child.stdin?.end();
 managedSessionIdentityPresent();
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 7"), []byte("GC_OPENCODE_HOOK_VERSION = 6"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 7"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
 	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)

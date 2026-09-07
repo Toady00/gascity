@@ -79,6 +79,14 @@ instead of inventing a parallel mechanism.
 
 ## Development approach
 
+- OpenCode auto-discovers the city plugin for manual launches too. Missing
+  Gas City identity is normal and must return no hooks without logging. PR
+  #5788 added the guard but still warned on each factory invocation; a single
+  resolved plugin entry does not guarantee only one invocation. Keep the
+  embedded plugin version and `managedOpenCodeHookVersion` in sync so installed
+  copies upgrade, and run `node --test internal/hooks/opencode_plugin.test.mjs`
+  for the silent-startup regression.
+
 **TDD.** Write the test first, watch it fail, make it pass. Every package
 has `*_test.go` files next to the code. Integration tests that need real
 infrastructure (tmux, filesystem) go in `test/` with build tags.
