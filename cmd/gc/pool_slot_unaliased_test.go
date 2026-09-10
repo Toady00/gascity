@@ -312,11 +312,13 @@ func TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim(t *testing.T) {
 
 	released := releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		testPoolReleaseConfig(),
 		"",
 		nil,
 		[]beads.Bead{work},
 		[]beads.Store{store},
+		nil,
 		nil,
 		nil,
 	)
