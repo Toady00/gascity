@@ -477,7 +477,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 	}
 	if _, err := startPreparedStartCandidate(
 		context.Background(), *prepared, "", env.store, env.sp, cfg, nil,
-		immediateSessionStaleKeyDetectionWaiter,
+		immediateSessionStaleKeyDetectionWaiter, nil,
 	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)
 	}
@@ -495,6 +495,49 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 	}
 	if strings.Contains(startCfg.Command, "--session") {
 		t.Fatalf("Start command = %q, must not carry a --session argument: the provider never created that conversation", startCfg.Command)
+	}
+}
+
+// driftResumeResumeCommandOnlyTemplateParams is the resume-capable shape that
+// carries a resume_command instead of a resume flag and no session_id_flag.
+// freshRestartSessionKeyInfo treats it as resume-capable, so the rotation must
+// clear rather than mint here too.
+func driftResumeResumeCommandOnlyTemplateParams() TemplateParams {
+	return TemplateParams{
+		Command:      "somecli",
+		SessionName:  "mayor",
+		TemplateName: "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "somecli",
+			Command:       "somecli",
+			ResumeCommand: "somecli resume {{.SessionKey}}",
+		},
+	}
+}
+
+// TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClearsKey
+// covers the resume_command arm of freshRestartSessionKeyInfo, which the
+// resume_flag cases above leave unexercised. The provider advertises resume
+// capability through resume_command alone and has no session_id_flag, so the
+// rotation must clear the stored key exactly as it does for the resume_flag
+// shape.
+func TestResetConfiguredNamedSessionForConfigDrift_ResumeCommandOnlyProviderClearsKey(t *testing.T) {
+	env := newReconcilerTestEnv()
+	session := env.createSessionBead("mayor", "mayor")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_key": "prior-provider-conversation",
+	})
+
+	resetConfiguredNamedSessionForConfigDriftInfo(
+		env.sessionInfo(session.ID), driftResumeResumeCommandOnlyTemplateParams(),
+		env.store, env.sp, "mayor", false, "asleep", time.Now().UTC(), &env.stderr)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get after reset: %v", err)
+	}
+	if key := got.Metadata["session_key"]; key != "" {
+		t.Fatalf("session_key = %q, want cleared: a resume_command-only provider cannot be handed a caller-minted ID", key)
 	}
 }
 
