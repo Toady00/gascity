@@ -204,7 +204,7 @@ workdir, or a sidecar init step).
 | `opencode` | `.opencode/skills/`  | materialize       |
 | `copilot`  | —                    | skip (no sink)    |
 | `cursor`   | —                    | skip (no sink)    |
-| `pi`       | —                    | skip (no sink)    |
+| `pi`       | `.agents/skills/`    | shared with codex |
 | `omp`      | —                    | skip (no sink)    |
 
 Implemented as a map keyed on `agent.Provider`; providers without an entry

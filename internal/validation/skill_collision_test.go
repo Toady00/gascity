@@ -125,6 +125,34 @@ func TestValidateSkillCollisions(t *testing.T) {
 		}
 	})
 
+	t.Run("codex and pi share a sink and collide", func(t *testing.T) {
+		tmp := t.TempDir()
+		aSkills := makeAgentSkillsDir(t, tmp, "a")
+		bSkills := makeAgentSkillsDir(t, tmp, "b")
+		writeAgentSkill(t, aSkills, "plan")
+		writeAgentSkill(t, bSkills, "plan")
+
+		// codex and pi both materialize into .agents/skills, so the
+		// gate must group them together even though the provider
+		// names differ.
+		cfg := &config.City{
+			Agents: []config.Agent{
+				{Name: "a", Provider: "codex", Scope: "city", SkillsDir: aSkills},
+				{Name: "b", Provider: "pi", Scope: "city", SkillsDir: bSkills},
+			},
+		}
+		got := ValidateSkillCollisions(cfg)
+		want := []SkillCollision{{
+			ScopeRoot:  "<city>",
+			Vendor:     "codex",
+			SkillName:  "plan",
+			AgentNames: []string{"a", "b"},
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
 	t.Run("different vendors do not collide", func(t *testing.T) {
 		tmp := t.TempDir()
 		aSkills := makeAgentSkillsDir(t, tmp, "a")
