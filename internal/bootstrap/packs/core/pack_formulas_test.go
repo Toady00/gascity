@@ -101,6 +101,18 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if startupAt < 0 || startupAt < currentAt {
 		t.Fatal("drain must not require a startup bead id before consulting the current claim")
 	}
+	// The current claim carries gc.root_bead_id, and on a warm seat it is the
+	// ONLY source of it: GC_BEAD_ID never reaches a session shell and
+	// GC_TRIGGER_BEAD_ID is demand-spawn-only (cmd/gc/cmd_hook_current.go).
+	// Reading the root off the startup bead first strands every warm seat on
+	// the deferred path — the ga-2q2r0 failure, one layer in.
+	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
+	if rootFromCurrent < 0 {
+		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
+	}
+	if rootFromCurrent > startupAt {
+		t.Fatal("drain must try the current claim's root before falling back to startup env vars")
+	}
 
 	updateAt := strings.Index(step, "gc bd update")
 	drainAckAt := strings.Index(step, "gc runtime drain-ack")
