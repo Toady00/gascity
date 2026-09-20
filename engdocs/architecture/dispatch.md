@@ -179,6 +179,28 @@ Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
 land on the same routed queue.
 
+Worker probes normally read at most 20 routed rows. If admission removes a
+full window, the probe rereads that route without the reader limit, filters
+again, then returns at most 20 admitted candidates. The legacy route fallback
+uses the same refill rule. This keeps excluded roots from hiding later work
+without making every worker probe an unlimited read.
+
+Both forms also apply one row-level admission stage the reader cannot express
+as a flag: an unassigned graph.v2 workflow root stamped
+`gc.workflow_expanded=true` (`beadmeta.IsExpandedWorkflow`) is dropped before
+any candidate cap and before the count. Such a root carries `gc.routed_to` and
+is dependency-ready from creation (its finalize edge is `tracks`), but it is a
+controller-owned latch whose step beads are the work; serving it hands one unit
+of work to a second seat and then respawns a seat for the root every tick
+(#6461). The rule is declared once in `PoolDemandServeRules`
+(`ExcludeExpandedWorkflows`) and rendered from there into both shell forms; the
+controller's `demandRowServable`, the hook's `filterUnreadyHookCandidates` and
+`hookCandidateClaimable` read the same predicate. A never-expanded root is the
+#2763 root-only shape and stays admissible; a root that already carries an
+assignee is that session's continuation anchor and is untouched. Roots
+persisted before the stamp existed are repaired by the
+`workflow-expanded-backfill` doctor check.
+
 Supported handoff forms are intentionally distinct. Generic pool demand is
 ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
 pool template itself is not pool demand. Direct named-session delivery is

@@ -21,6 +21,7 @@ var doctorCityStoreDependentNames = []string{
 	"executor-identity-residue",
 	"census-owner-liveness",
 	"run-target-routed-to-backfill",
+	"workflow-expanded-backfill",
 	"route-recovery-quarantine",
 	"hold-label-routed-to",
 	"pool-idle-routed-work",

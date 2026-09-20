@@ -914,10 +914,11 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
 // fresh claim: it has an id, is currently unassigned, matches one of this
-// session's route targets, and is not still within a build-budget deferral
-// window (see hookCandidateBudgetDeferred).
+// session's route targets, is not an expanded workflow root, and is not within
+// a build-budget deferral window (see hookCandidateBudgetDeferred).
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
+		!beadmeta.IsExpandedWorkflow(candidate.Metadata) &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
@@ -949,8 +950,10 @@ func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
 // inside its gc.budget_deferred_until window is never reclaim-eligible: the
 // budget gate must hold across both the fresh-claim and reclaim paths, or a
 // stale assignee lets a deferred candidate bypass the daily build budget.
+// An expanded root cannot gain a new owner through stale-claim recovery either.
 func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
+		!beadmeta.IsExpandedWorkflow(candidate.Metadata) &&
 		strings.TrimSpace(candidate.Assignee) != "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
@@ -2952,18 +2955,16 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 // unit of work, with no compiled children - is claimable via its
 // gc.run_target authoring hint. It must not also resurrect a fully-expanded
 // root: once compile.go gives a graph.v2 root real child steps, it stamps
-// gc.workflow_expanded=true, and that root's only remaining path to
-// dependency-readiness is every real child closing while workflow-finalize
-// has not yet run and closed it (#5900) - a state the fallback must not
-// treat as claimable (WorkflowTopologyKinds document workflow roots as never
-// claimable). A candidate without the stamp predates this fix or was never
-// expanded, so it keeps the original permissive behavior.
+// gc.workflow_expanded=true. Its finalizer dependency is informational, so
+// it can be ready throughout execution. Neither route may admit it as fresh
+// work. Unmarked roots retain root-only launch compatibility; doctor can
+// backfill the stamp on older roots with persisted members.
 func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	if kind != beadmeta.KindWorkflow {
 		return false
 	}
-	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
+	return !beadmeta.IsExpandedWorkflow(candidate.Metadata)
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
@@ -3000,6 +3001,9 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 func hookCandidateVisible(candidate beads.Bead, identities, routeTargets []string) bool {
 	if assignee := strings.TrimSpace(candidate.Assignee); assignee != "" {
 		return hookClaimHasIdentity(assignee, identities)
+	}
+	if beadmeta.IsExpandedWorkflow(candidate.Metadata) {
+		return false
 	}
 	if hookClaimRoute(candidate) == "" {
 		return true

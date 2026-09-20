@@ -192,6 +192,9 @@ type PoolDemandServeRules struct {
 	// ExcludeLabels mirrors the repeated --exclude-label flags: the dispatch
 	// holds a worker is deliberately forbidden to claim through.
 	ExcludeLabels []string
+	// ExcludeExpandedWorkflows withholds structural roots from fresh demand.
+	// Existing owners still use the assigned tiers for continuation.
+	ExcludeExpandedWorkflows bool
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
@@ -199,9 +202,10 @@ type PoolDemandServeRules struct {
 // query) consume this; see the controller demand loop in cmd/gc.
 func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
-		RequireUnassigned: true,
-		ExcludeTypes:      []string{"epic"},
-		ExcludeLabels:     append([]string(nil), beadmeta.DispatchHoldLabels...),
+		RequireUnassigned:        true,
+		ExcludeTypes:             []string{"epic"},
+		ExcludeLabels:            append([]string(nil), beadmeta.DispatchHoldLabels...),
+		ExcludeExpandedWorkflows: true,
 	}
 }
 
@@ -227,6 +231,19 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json ` + limitFlag
 }
 
+// poolDemandAdmissionJQ filters before the caller applies a candidate limit.
+// Metadata is string-valued in Go; tostring matches the bead JSON decoder's
+// tolerance for a boolean expansion marker from a custom reader.
+func poolDemandAdmissionJQ() string {
+	if !PoolDemandServeRulesForQuery().ExcludeExpandedWorkflows {
+		return "."
+	}
+	text := func(key string) string {
+		return `(` + jqMeta(key) + ` | tostring | gsub("^\\s+|\\s+$"; ""))`
+	}
+	return `[.[] | select(((` + text(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` + text(beadmeta.WorkflowExpandedMetadataKey) + ` == "true")) | not)]`
+}
+
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
 // graph.v2 workflow roots created before gc.routed_to root stamping shipped.
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
@@ -242,7 +259,7 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
+	filter := poolDemandAdmissionJQ() + ` | [.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -340,9 +357,13 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 	filter := legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
-		limit,
+		0,
 		true,
 	)
+	filter += ` | ` + poolDemandAdmissionJQ()
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
 		query = bdQueryEphemeralStatusQuietShell("open")
@@ -358,16 +379,25 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
+// A full window removed by admission is reread without a reader limit. This
+// prevents excluded roots from hiding later work; ordinary probes stay bounded.
 func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 	fed := topo.FederatedReady
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`gc_pool_window="$r"; ` +
 		preferExecutablePoolDemandScript() +
+		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$gc_pool_window" | jq -r 'length >= 20' 2>/dev/null)" = "true" ]; then ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		preferExecutablePoolDemandScript() + `fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$legacy_candidates" | jq -r 'length >= 20' 2>/dev/null)" = "true" ]; then ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
@@ -376,15 +406,13 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
-// preferExecutablePoolDemandScript keeps graph-v2 workflow roots available as
-// launch fallbacks, but moves them behind executable routed work in the same
-// ready result. The claim hook consumes candidates in order; without this
-// preference an older root can be returned forever while its ready child waits
-// behind it. A malformed reader payload is preserved for the hook's existing
-// fail-open handling rather than being converted into false-empty demand.
+// preferExecutablePoolDemandScript removes expanded roots, prefers executable
+// work over root-only launches, and bounds the admitted candidate batch. A
+// malformed reader payload is preserved for the hook's existing error handling
+// rather than being converted into false-empty demand.
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
-	preferJQ := `[.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+	preferJQ := poolDemandAdmissionJQ() + ` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:20]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
@@ -406,6 +434,9 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
+	// If admission removes a full window, poolDemandFirstRowFunctionScript
+	// rereads without a reader limit and then limits the admitted output. This
+	// keeps ordinary probes bounded without letting 20 roots hide every step.
 	return bdReadyPoolDemandShell("--limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
@@ -428,7 +459,7 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s ` + shellquote.Quote(`(add // []) | `+poolDemandAdmissionJQ()+` | unique_by(.id) | length`)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
