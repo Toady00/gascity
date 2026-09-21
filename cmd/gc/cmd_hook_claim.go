@@ -2957,8 +2957,8 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 // root: once compile.go gives a graph.v2 root real child steps, it stamps
 // gc.workflow_expanded=true. Its finalizer dependency is informational, so
 // it can be ready throughout execution. Neither route may admit it as fresh
-// work. Unmarked roots retain root-only launch compatibility; doctor can
-// backfill the stamp on older roots with persisted members.
+// work. Unmarked roots retain root-only launch compatibility; older expanded
+// roots need the stamp set manually after verifying their persisted members.
 func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	if kind != beadmeta.KindWorkflow {

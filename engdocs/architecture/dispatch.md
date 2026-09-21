@@ -197,9 +197,8 @@ of work to a second seat and then respawns a seat for the root every tick
 controller's `demandRowServable`, the hook's `filterUnreadyHookCandidates` and
 `hookCandidateClaimable` read the same predicate. A never-expanded root is the
 #2763 root-only shape and stays admissible; a root that already carries an
-assignee is that session's continuation anchor and is untouched. Roots
-persisted before the stamp existed are repaired by the
-`workflow-expanded-backfill` doctor check.
+assignee is that session's continuation anchor and is untouched. Older expanded
+roots missing the stamp need a one-time manual metadata update.
 
 Supported handoff forms are intentionally distinct. Generic pool demand is
 ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the

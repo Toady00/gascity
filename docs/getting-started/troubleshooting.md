@@ -717,31 +717,6 @@ for the mental model, the forbidden edits, the sanctioned escape
 hatches (`gc rig set-endpoint --inherit`/`--self --force`/`--external`),
 and an end-to-end recovery recipe.
 
-## Pool Workers Keep Claiming a Workflow Root
-
-A graph.v2 workflow root is a controller-owned latch: its step beads are the
-work, and `workflow-finalize` closes it. Roots compiled with step beads carry
-`gc.workflow_expanded = "true"`, and every reader of unassigned routed work
-refuses such a root. Roots persisted by a build that predates that stamp read
-as root-only, so a second pool seat can claim the root while another seat is
-already running its step, release it, and be respawned for it on the next
-tick. Those roots need an explicit repair; the runtime does not stamp them.
-
-```bash
-gc doctor --check workflow-expanded-backfill          # report only
-gc doctor --check workflow-expanded-backfill --fix    # stamp the marker
-```
-
-The check reads the city store, every active rig store, and the relocated
-graph binding when `[storage]` serves the graph class separately. It stamps a
-root only when at least one other bead (closed members included) carries
-`gc.root_bead_id` naming it and the root is a `gc.kind = workflow` /
-`gc.formula_contract = graph.v2` bead. Routing and assignee are left as they
-are, so a session that already owns a root keeps it as its continuation
-anchor; a root with no members is a root-only launch and stays claimable. A
-store or root that cannot be read is reported and `--fix` fails rather than
-declaring it clean.
-
 ## Still Stuck?
 
 If a symptom only makes sense once you know how the pieces fit together, see
