@@ -92,6 +92,30 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
+			// The canonical-route twin of a-13 (#6461): an expanded root on
+			// gc.routed_to is a latch whose children are the work. Neither side
+			// may count or serve it.
+			name: "fully-expanded workflow root routed to the pool",
+			bead: beads.Bead{ID: "a-14", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			// The #2763 shape on the canonical route: a root-only root is the
+			// unit of work and stays both counted and servable.
+			name: "root-only workflow root routed to the pool",
+			bead: beads.Bead{ID: "a-15", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:        agreementTemplate,
+			}},
+			wantServable: true,
+		},
+		{
 			name: "routed epic",
 			bead: beads.Bead{
 				ID: "a-7", Status: "open", Type: "epic",
@@ -243,6 +267,15 @@ func TestTierThreeServeRulesMatchTheGeneratedQuery(t *testing.T) {
 				t.Errorf("the generated query carries %s%s but PoolDemandServeRules does not declare it", flag, got)
 			}
 		}
+	}
+	// The expanded-root rule has no bd flag, so it rides a jq stage over the
+	// rows: the rule and the rendered stage must agree in both directions.
+	// Match the admission select, not merely a reference to the metadata key.
+	expandedClause := `(.metadata["` + beadmeta.WorkflowExpandedMetadataKey + `"] // "")`
+	hasStage := strings.Contains(query, expandedClause+` | tostring | gsub("^\\s+|\\s+$"; "")) == "true")) | not)`)
+	if rules.ExcludeExpandedWorkflows != hasStage {
+		t.Errorf("PoolDemandServeRules.ExcludeExpandedWorkflows = %v but the generated query carrying the admission stage = %v:\n%s",
+			rules.ExcludeExpandedWorkflows, hasStage, query)
 	}
 }
 
@@ -428,7 +461,7 @@ func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metada
 	if !workerIsServed(bead, opts, metaWant) {
 		return false
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
+	if beadmeta.IsExpandedWorkflow(bead.Metadata) {
 		return false
 	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
@@ -467,7 +500,7 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
 	// query is compared with the sh -c single-quote escaping undone, so the pin
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true"))] | .[:1]'`
+	const wantFilter = `jq '[.[] | select(((((.metadata["gc.kind"] // "") | tostring | gsub("^\\s+|\\s+$"; "")) == "workflow") and (((.metadata["gc.workflow_expanded"] // "") | tostring | gsub("^\\s+|\\s+$"; "")) == "true")) | not)] | [.[] | select((.metadata["gc.routed_to"] // "") == "")] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}
