@@ -935,9 +935,9 @@ const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
 
 // poolDemandOriginGateScript emits the plain origin gate. It is valid only at
 // `sh -c` script top level, where $1 is the probe target baked in after `--`.
-func poolDemandOriginGateScript() string {
+func poolDemandOriginGateScript(a *Agent) string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
+		poolDemandAdmittedOrigins(a) + `) ;; ` +
 		`*) ` + namedSelfTargetAdmit + ` || exit 0 ;; ` +
 		`esac; `
 }
@@ -946,9 +946,9 @@ func poolDemandOriginGateScript() string {
 // the combined work query, which flushes a remembered assigned workflow anchor
 // before short-circuiting. Like the plain gate it is valid only at `sh -c` script
 // top level, where $1 is the probe target baked in after `--`.
-func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
+func poolDemandOriginGateScriptWithGraphAnchorFallback(a *Agent) string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
+		poolDemandAdmittedOrigins(a) + `) ;; ` +
 		`*) ` + namedSelfTargetAdmit + ` || { [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; } ;; ` +
 		`esac; `
 }
@@ -977,16 +977,26 @@ func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
 		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
 
-func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
+// poolDemandAdmittedOrigins includes named holders for canonical singletons,
+// where the controller wakes the holder rather than creating a standby.
+// Other non-ephemeral sessions still use the explicit self-target alias gate.
+func poolDemandAdmittedOrigins(a *Agent) string {
+	if a.UsesCanonicalSingletonPoolIdentity() {
+		return `ephemeral|named|""`
+	}
+	return `ephemeral|""`
+}
+
+func routedPoolWorkQueryProbeScript(a *Agent, topo QueryTopology, targetCount int) string {
+	script := poolDemandOriginGateScript(a) + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
+func routedPoolWorkQueryCommand(a *Agent, topo QueryTopology, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(a, topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -1095,7 +1105,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScriptWithGraphAnchorFallback() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 			// Define the ordinary pool reader before the narrower anchor reader.
 			// Besides keeping the generated tiers easy to identify mechanically,
 			// function definition order does not change their invocation order:
@@ -1109,7 +1119,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScriptWithGraphAnchorFallback() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 		poolDemandFirstRowFunctionScript(topo) +
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
@@ -1185,9 +1195,9 @@ func buildRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(a, topo, target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(a, topo, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
