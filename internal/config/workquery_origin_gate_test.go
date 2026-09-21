@@ -8,8 +8,8 @@ import (
 // This file pins the routed-tier origin gate against the controller's
 // routed-demand wake contract (#4644, ga-jl73y2).
 //
-// The gate exists so a named or manual session cannot steal routed demand
-// that a pool standby will serve. For a canonical singleton template
+// Without an explicit self-target alias, the gate prevents named or manual
+// sessions from taking routed demand that a pool standby will serve. For a canonical singleton template
 // (max_active_sessions = 1, no namepool) the controller never mints that
 // standby: it wakes the named holder instead (NamedSessionRoutedDemand,
 // "routed-demand" wake reason) and assumes "routed metadata is consumed by
@@ -52,7 +52,8 @@ func multiInstancePoolAgent() Agent {
 }
 
 // TestRoutedTierOriginGateByAgentShape is the full contract table: which
-// origins each template shape admits to the routed tier.
+// origins each template shape admits without the independent self-target alias
+// exemption, which is covered by workquery_named_routed_gate_test.go.
 func TestRoutedTierOriginGateByAgentShape(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -75,7 +76,7 @@ func TestRoutedTierOriginGateByAgentShape(t *testing.T) {
 		// standby, so its named session must not steal it.
 		{"multi/named", multiInstancePoolAgent(), "named", false},
 
-		// Unchanged: manual sessions never consume routed demand, on any shape.
+		// Manual sessions need the independent explicit self-target alias.
 		{"singleton/manual", canonicalSingletonAgent(), "manual", false},
 		{"multi/manual", multiInstancePoolAgent(), "manual", false},
 	}
@@ -88,7 +89,7 @@ func TestRoutedTierOriginGateByAgentShape(t *testing.T) {
 				out := strings.TrimSpace(runShellWithFakeBd(t, query, map[string]string{
 					"GC_SESSION_ID":     "sess-1",
 					"GC_SESSION_NAME":   "hello-world--archivist",
-					"GC_ALIAS":          "hello-world/archivist",
+					"GC_ALIAS":          "",
 					"GC_SESSION_ORIGIN": tc.origin,
 				}, routedSingletonFakeBD))
 				got := strings.Contains(out, "routed-bead")
@@ -104,7 +105,7 @@ func TestRoutedTierOriginGateByAgentShape(t *testing.T) {
 // TestRoutedTierOriginGateScriptShape pins the generated shell for both
 // shapes so the golden fixtures and this reasoning cannot drift apart: the
 // singleton admits named, the multi-instance pool does not, and neither
-// admits manual.
+// admits manual solely on the origin value.
 func TestRoutedTierOriginGateScriptShape(t *testing.T) {
 	singleton := canonicalSingletonAgent()
 	multi := multiInstancePoolAgent()

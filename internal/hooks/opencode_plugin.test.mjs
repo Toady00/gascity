@@ -47,7 +47,7 @@ test("OpenCode factory is silent without identity and registers managed hooks", 
       process.env = { [key]: "managed-test-session" };
       const hooks = await factory({ directory: "/unused", client: {} });
       assert.deepEqual(Object.keys(hooks).sort(), [
-        "chat.message", "event", "experimental.chat.system.transform", "experimental.session.compacting",
+        "event", "experimental.chat.system.transform", "experimental.session.compacting",
       ]);
       for (const hook of Object.values(hooks)) assert.equal(typeof hook, "function");
     }
