@@ -2,7 +2,6 @@ package herdr
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -14,31 +13,18 @@ import (
 // Verified empirically against the herdr binary itself: `XDG_CONFIG_HOME=X
 // herdr --help` prints "Config: X/herdr/config.toml" regardless of $HOME,
 // and with XDG_CONFIG_HOME unset it falls back to "$HOME/.config/herdr/…" —
-// standard XDG Base Directory precedence, which os.UserConfigDir()
-// implements and the old os.UserHomeDir()+".config" join did not: a sandbox
-// that sets XDG_CONFIG_HOME to the real user's config dir while redirecting
-// $HOME elsewhere (this fleet's agent sandboxes do exactly that) made the
-// old code compute a path no herdr process ever binds.
-//
-// Both tests below are Linux-only: os.UserConfigDir() on darwin ignores
-// XDG_CONFIG_HOME entirely and always resolves under
-// "$HOME/Library/Application Support" (see the Go stdlib implementation),
-// so asserting an XDG- or ".config"-rooted path is only valid on the
-// platforms os.UserConfigDir() treats as XDG-following (this repo's
-// non-Windows, non-Darwin default case). Whether herdr's own binary uses
-// pure-XDG resolution on macOS too is unverified here — the empirical
-// check above was run on Linux only — so the tests skip rather than assert
-// an unconfirmed cross-platform contract.
-
-func skipUnlessXDGPlatform(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
-	}
-}
+// standard XDG Base Directory precedence, on every platform herdr ships for
+// (macOS included; darwin herdr 0.8.2 behaves identically). Neither stdlib
+// shortcut implements that contract everywhere: os.UserConfigDir() ignores
+// XDG_CONFIG_HOME on darwin and answers "$HOME/Library/Application Support",
+// and the old os.UserHomeDir()+".config" join ignored XDG_CONFIG_HOME on all
+// platforms — a sandbox that sets XDG_CONFIG_HOME to the real user's config
+// dir while redirecting $HOME elsewhere (this fleet's agent sandboxes do
+// exactly that) made the old code compute a path no herdr process ever
+// binds. These tests pin the herdr-matching resolution on every platform,
+// so they must not be skipped per-OS.
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
-	skipUnlessXDGPlatform(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("HOME", t.TempDir()) // deliberately different; must be ignored
@@ -55,7 +41,6 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
-	skipUnlessXDGPlatform(t)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
