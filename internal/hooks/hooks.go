@@ -35,7 +35,7 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 9
-	managedOpenCodeHookVersion = 6
+	managedOpenCodeHookVersion = 8
 	managedMimoCodeHookVersion = 2
 	managedOmpHookVersion      = 2
 )
@@ -458,7 +458,11 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// Optional injection must run concurrently (#5553).
 		!hookContains(content, "Promise.all([") ||
 		// Consumptive queue draining must be scoped to a turn (#5552).
-		!hookContains(content, "drainedTurnID") {
+		!hookContains(content, "drainedTurnID") ||
+		// OpenCode loads the workdir plugin for human-launched sessions
+		// too; without the identity guard the plugin runs gc lifecycle
+		// commands in sessions gc does not manage.
+		!hookContains(content, "managedSessionIdentityPresent()") {
 		return true
 	}
 	for _, marker := range []string{

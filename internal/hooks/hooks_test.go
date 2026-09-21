@@ -1778,7 +1778,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
 		"drainedTurnID",
 		`process.env.GC_BIN || "gc"`,
@@ -2205,7 +2206,8 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
@@ -2226,9 +2228,29 @@ export default async function gascityPlugin() {
 	}
 }
 
+func TestInstallOpenCodeHookUpgradesVersion7(t *testing.T) {
+	fs := fsys.NewFake()
+	const dst = "/work/.opencode/plugins/gascity.js"
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	current := fs.Files[dst]
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	fs.Files[dst] = stale
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !bytes.Equal(fs.Files[dst], current) || opencodeHookVersion(string(fs.Files[dst])) != 8 {
+		t.Fatal("version 7 OpenCode plugin was not upgraded to current version 8 bytes")
+	}
+	if !bytes.Equal(fs.Files[dst+".bak"], stale) {
+		t.Fatal("version 7 OpenCode plugin backup does not match original bytes")
+	}
+}
+
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 6;
+const GC_OPENCODE_HOOK_VERSION = 8;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2236,6 +2258,7 @@ function logRunFailure(args, directory, err) {}
 function logRunStderr(stderr) {}
 async function runWithWarning(directory, ...args) {}
 function providerSessionEnv(sessionID) {}
+function managedSessionIdentityPresent() {}
 "experimental.session.compacting";
 logRunStderr(stderr);
 runWithWarning(directory, "handoff", "--auto", "context cycle");
@@ -2245,14 +2268,16 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 pending.child.stdin?.end();
 Promise.all([]);
 drainedTurnID;
+managedSessionIdentityPresent();
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
 	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
 	unscopedDrain := bytes.Replace(current, []byte("drainedTurnID;\n"), nil, 1)
+	unguarded := bytes.ReplaceAll(current, []byte("managedSessionIdentityPresent"), []byte("somethingElse"))
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2277,6 +2302,9 @@ drainedTurnID;
 	}
 	if !opencodeHookNeedsUpgrade(unscopedDrain) {
 		t.Fatal("OpenCode hook without turn-scoped queue draining did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(unguarded) {
+		t.Fatal("OpenCode hook without the unmanaged-session guard did not request upgrade")
 	}
 }
 
