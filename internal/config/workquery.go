@@ -424,8 +424,9 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
-// A full window removed by admission is reread without a reader limit. This
-// prevents excluded roots from hiding later work; ordinary probes stay bounded.
+// A full window with any row removed by admission is reread without a reader
+// limit. This prevents excluded roots from hiding later work; ordinary probes
+// stay bounded.
 func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 	fed := topo.FederatedReady
 	return `probe_pool_demand() { ` +
@@ -434,7 +435,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`gc_pool_window="$r"; ` +
 		preferExecutablePoolDemandScript() +
-		`if [ "$(jq -nr --argjson raw "$gc_pool_window" --argjson admitted "$r" ` + shellquote.Quote(`$raw | (length >= `+strconv.Itoa(poolDemandCandidateLimit)+` and (($admitted | length) < length))`) + ` 2>/dev/null)" = "true" ]; then ` +
+		`if [ "$(printf "%s\n%s\n" "$gc_pool_window" "$r" | jq -sr ` + shellquote.Quote(`.[0] as $raw | .[1] as $admitted | ($raw | length) >= `+strconv.Itoa(poolDemandCandidateLimit)+` and (($admitted | length) < ($raw | length))`) + ` 2>/dev/null)" = "true" ]; then ` +
 		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		preferExecutablePoolDemandScript() + `fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +

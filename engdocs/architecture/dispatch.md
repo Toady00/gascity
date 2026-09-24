@@ -179,11 +179,11 @@ Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
 land on the same routed queue.
 
-Worker probes normally read at most 20 routed rows. If admission removes a
-full window, the probe rereads that route without the reader limit, filters
-again, then returns at most 20 admitted candidates. The legacy route fallback
-uses the same refill rule. This keeps excluded roots from hiding later work
-without making every worker probe an unlimited read.
+Worker probes normally read at most 20 routed rows. If admission removes any
+row from a full window, the probe rereads that route without the reader limit,
+filters again, then returns at most 20 admitted candidates. The legacy route
+fallback uses the same refill rule. This keeps excluded roots from hiding later
+work without making every worker probe an unlimited read.
 
 Both forms also apply one row-level admission stage the reader cannot express
 as a flag: `PoolDemandServeRules.ExcludeWorkflowTopology` keeps formula specs,

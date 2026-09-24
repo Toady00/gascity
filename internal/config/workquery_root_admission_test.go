@@ -59,7 +59,7 @@ jq -nc --arg mode "$MODE" --argjson limit "$limit" '
 	}
 }
 
-func TestWorkflowRootAdmissionRefillsOnlyAnExcludedFullWindow(t *testing.T) {
+func TestWorkflowRootAdmissionRefillsPartiallyExcludedFullWindow(t *testing.T) {
 	a := Agent{Name: "worker"}
 	for _, tc := range []struct {
 		name      string
@@ -116,6 +116,41 @@ jq -nc --arg tier "$TIER" --argjson limit "$limit" --argjson roots "$ROOTS" --ar
 				t.Fatalf("read limits = %s, want %s", got, tc.wantReads)
 			}
 		})
+	}
+}
+
+func TestWorkflowRootAdmissionRefillHandlesWindowLargerThanExecArgument(t *testing.T) {
+	a := Agent{Name: "worker"}
+	log := filepath.Join(t.TempDir(), "reads")
+	script := `#!/bin/sh
+set -eu
+case "$*" in
+  *"gc.routed_to=worker"*) ;;
+  *) printf '[]'; exit 0 ;;
+esac
+limit=0
+for arg in "$@"; do
+  case "$arg" in --limit=*) limit=${arg#--limit=} ;; esac
+done
+printf '%s\n' "$limit" >> "$READ_LOG"
+jq -nc --arg padding "$PADDING" --argjson limit "$limit" '
+  [range(0; 20) | {id:("root-" + tostring),description:$padding,metadata:{"gc.kind":"workflow","gc.workflow_expanded":"true"}}]
+  + [{id:"work",metadata:{"gc.kind":"task"}}]
+  | if $limit > 0 then .[:$limit] else . end'
+`
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"PADDING":  strings.Repeat("x", 7_000),
+		"READ_LOG": log,
+	}, script)
+	if got := strings.Join(workQueryOutputIDOrder(t, out), ","); got != "work" {
+		t.Fatalf("work IDs = %s, want work", got)
+	}
+	reads, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(strings.Fields(string(reads)), ","); got != "20,0" {
+		t.Fatalf("read limits = %s, want 20,0", got)
 	}
 }
 
