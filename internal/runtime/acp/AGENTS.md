@@ -15,6 +15,10 @@
   after Close: another provider may already have bound a replacement.
 - A dead in-memory connection can coexist with a live replacement owned by
   another provider. Its stale `Stop` must not remove the replacement's metadata.
+  It must still evict its own dead entry and report success: a tracked dead
+  entry makes `IsRunning` short-circuit on it and call the live replacement
+  dead, and a non-gone error on that steady state is re-logged every tick by
+  callers that branch only on `IsSessionGone`.
 - Release the lifecycle lock after committing the real connection, before the
   initial nudge. A blocked stdin write needs Stop to acquire that lock and close
   the pipe. Bind initial delivery to the committed connection, not another

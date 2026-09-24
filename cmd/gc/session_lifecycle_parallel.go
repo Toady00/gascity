@@ -2467,6 +2467,11 @@ func commitStartResultTraced(
 		return startCommitFailed
 	}
 	if !applied {
+		// Unlike every other non-success return here, this one deliberately does
+		// NOT clearPendingStartInFlightLease: the lease is no longer ours. A
+		// rollback that won the race already cleared last_woke_at itself via
+		// preCloseClears, and where a newer incarnation won instead the lease is
+		// now that incarnation's — clearing here would clobber a successor's.
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "stale_async_start", result.started, result.finished, nil, result.phases)
 		return startCommitStale
 	}
@@ -2744,6 +2749,14 @@ func recoverRunningPendingCreate(
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
 	if !applied {
+		// CommitStartedIfCurrent refused: a newer incarnation or a rollback
+		// won the race. Record it like every sibling early-out here and like
+		// the reconciler's own not-applied rollback site — a silently fenced
+		// heal that leaves no decision row is indistinguishable in a trace
+		// from one that was never attempted.
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateSuperseded, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, nil)
+		}
 		return false, nil
 	}
 	// buildPreparedStart mints instance_token onto the twin + store (SetMarker) when

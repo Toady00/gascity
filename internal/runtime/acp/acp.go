@@ -495,6 +495,14 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
+//
+// A dead connection whose name another provider has already rebound is not
+// this provider's to tear down. Stop evicts its own stale bookkeeping and
+// returns nil, leaving the replacement's process and sidecars alone: callers
+// branch only on runtime.IsSessionGone, so a non-gone error on that steady
+// state would be re-logged every reconciler tick, and the eviction is what
+// lets IsRunning fall back to the socket probe instead of reporting the live
+// replacement as dead.
 func (p *Provider) Stop(name string) error {
 	// Keep the reservation until Start has killed its process and drained all
 	// writes. A retry must never race the old attempt's sidecar/socket cleanup.
@@ -517,8 +525,14 @@ func (p *Provider) Stop(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	if ok && !sc.alive() && p.socketAlive(name) {
+		// A replacement owns this name. Drop only this provider's dead
+		// bookkeeping — skipping cleanupMeta and process teardown keeps the
+		// replacement's identity sidecars — so IsRunning stops short-circuiting
+		// on the dead conn and falls through to the socket probe.
+		delete(p.conns, name)
+		delete(p.workDirs, name)
 		p.mu.Unlock()
-		return fmt.Errorf("%w: refusing cleanup of replacement runtime %q", runtime.ErrSessionExists, name)
+		return nil
 	}
 	if ok {
 		delete(p.conns, name)

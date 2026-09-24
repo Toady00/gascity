@@ -555,7 +555,9 @@ func TestStopStaleConnectionPreservesNewIncarnation(t *testing.T) {
 	reader := NewProviderWithDir(p.dir, Config{})
 	name := testName()
 	ctx := testingContext(t)
-	cfg := runtime.Config{Command: fakeACPShellCommand(), Env: map[string]string{"GC_SESSION_ID": "old"}}
+	// WorkDir is set so p.workDirs gains an entry: Stop must evict that map too,
+	// and the assertion below is vacuous without it.
+	cfg := runtime.Config{Command: fakeACPShellCommand(), WorkDir: t.TempDir(), Env: map[string]string{"GC_SESSION_ID": "old"}}
 	if err := p.Start(ctx, name, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -573,11 +575,26 @@ func TestStopStaleConnectionPreservesNewIncarnation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Stop(name) })
-	if err := p.Stop(name); err == nil {
-		t.Error("stale Stop should report the foreign runtime")
+	// Stop is documented idempotent and every caller branches only on
+	// runtime.IsSessionGone, so a healthy replacement must not surface as a
+	// Stop failure they would re-log on each reconciler tick.
+	if err := p.Stop(name); err != nil {
+		t.Errorf("stale Stop = %v, want nil", err)
+	}
+	// The dead entry must be gone from both maps: while it is tracked,
+	// IsRunning short-circuits on it and never reaches the socket probe.
+	p.mu.Lock()
+	_, connTracked := p.conns[name]
+	_, dirTracked := p.workDirs[name]
+	p.mu.Unlock()
+	if connTracked || dirTracked {
+		t.Errorf("stale Stop left bookkeeping: conn=%v workDir=%v", connTracked, dirTracked)
 	}
 	if !reader.IsRunning(name) {
 		t.Error("stale Stop killed replacement")
+	}
+	if !p.IsRunning(name) {
+		t.Error("stale provider reports the live replacement as not running")
 	}
 	if got, err := reader.GetMeta(name, "GC_SESSION_ID"); err != nil || got != "new" {
 		t.Errorf("stale Stop removed replacement metadata: %q, %v", got, err)
