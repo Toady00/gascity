@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,12 +65,14 @@ func TestWorkflowRootAdmissionRefillsOnlyAnExcludedFullWindow(t *testing.T) {
 		name      string
 		tier      string
 		roots     string
+		work      string
+		wantCount int
 		wantReads string
 	}{
-		{"ordinary", "canonical", "0", "20"},
-		{"mixed-window", "canonical", "2", "20"},
-		{"excluded-full-window", "canonical", "25", "20,0"},
-		{"legacy-excluded-full-window", "legacy", "25", "20,0"},
+		{"ordinary", "canonical", "0", "1", 1, "20"},
+		{"mixed-window", "canonical", "2", "1", 1, "20"},
+		{"excluded-full-window", "canonical", "25", "30", 20, "20,0"},
+		{"legacy-excluded-full-window", "legacy", "25", "30", 1, "20,0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log := filepath.Join(t.TempDir(), "reads")
@@ -84,14 +87,25 @@ for arg in "$@"; do
   case "$arg" in --limit=*) limit=${arg#--limit=} ;; esac
 done
 printf '%s\n' "$limit" >> "$READ_LOG"
-jq -nc --arg tier "$TIER" --argjson limit "$limit" --argjson roots "$ROOTS" '
+jq -nc --arg tier "$TIER" --argjson limit "$limit" --argjson roots "$ROOTS" --argjson work "$WORK" '
   [range(0; $roots) | {id:("root-" + tostring),metadata:{"gc.kind":"workflow","gc.workflow_expanded":"true"}}]
-  + [{id:"work",metadata:{"gc.kind":(if $tier == "legacy" then "workflow" else "task" end)}}]
+  + [range(0; $work) | {id:("work-" + tostring),metadata:{"gc.kind":(if $tier == "legacy" then "workflow" else "task" end)}}]
   | if $limit > 0 then .[:$limit] else . end'
 `
-			out := runEffectiveWorkQuery(t, a, map[string]string{"READ_LOG": log, "ROOTS": tc.roots, "TIER": tc.tier}, script)
-			if ids := workQueryOutputIDOrder(t, out); strings.Join(ids, ",") != "work" {
-				t.Fatalf("work IDs = %v, want work", ids)
+			out := runEffectiveWorkQuery(t, a, map[string]string{
+				"READ_LOG": log,
+				"ROOTS":    tc.roots,
+				"TIER":     tc.tier,
+				"WORK":     tc.work,
+			}, script)
+			ids := workQueryOutputIDOrder(t, out)
+			if len(ids) != tc.wantCount {
+				t.Fatalf("work IDs = %v, want %d rows", ids, tc.wantCount)
+			}
+			for i, id := range ids {
+				if want := "work-" + strconv.Itoa(i); id != want {
+					t.Fatalf("work IDs = %v, want ordered prefix ending at work-%d", ids, tc.wantCount-1)
+				}
 			}
 			reads, err := os.ReadFile(log)
 			if err != nil {
