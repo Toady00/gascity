@@ -661,7 +661,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
-			!hookCandidateHasClaimableKind(candidate) ||
+			(!hookCandidateHasClaimableKind(candidate) && !hookCandidateIsOwnedWorkflowAnchor(candidate, opts)) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateBudgetDeferred(candidate, now) {
@@ -752,6 +752,15 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// hookCandidateIsOwnedWorkflowAnchor admits an expanded graph root only on the
+// assigned-ready path. The assignment is the continuation contract: it lets
+// this session promote its preassigned anchor without making the same root
+// available as fresh routed work to an unrelated session.
+func hookCandidateIsOwnedWorkflowAnchor(candidate beads.Bead, opts hookClaimOptions) bool {
+	return strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow &&
+		hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates)
 }
 
 // hookClaimBeadIsElsewhere reports whether a failed claim proves the bead is not

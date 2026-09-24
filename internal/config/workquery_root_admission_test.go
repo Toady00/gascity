@@ -71,6 +71,7 @@ func TestWorkflowRootAdmissionRefillsOnlyAnExcludedFullWindow(t *testing.T) {
 	}{
 		{"ordinary", "canonical", "0", "1", 1, "20"},
 		{"mixed-window", "canonical", "2", "1", 1, "20"},
+		{"partially-excluded-full-window", "canonical", "19", "2", 2, "20,0"},
 		{"excluded-full-window", "canonical", "25", "30", 20, "20,0"},
 		{"legacy-excluded-full-window", "legacy", "25", "30", 1, "20,0"},
 	} {

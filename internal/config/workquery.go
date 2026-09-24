@@ -287,6 +287,8 @@ func poolDemandAdmissionJQ() string {
 	return `[.[] | select(` + poolDemandMetadataJQPredicate() + `)]`
 }
 
+const poolDemandCandidateLimit = 20
+
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
 // graph.v2 workflow roots created before gc.routed_to root stamping shipped.
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
@@ -432,17 +434,17 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`gc_pool_window="$r"; ` +
 		preferExecutablePoolDemandScript() +
-		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$gc_pool_window" | jq -r 'length >= 20' 2>/dev/null)" = "true" ]; then ` +
+		`if [ "$(jq -nr --argjson raw "$gc_pool_window" --argjson admitted "$r" ` + shellquote.Quote(`$raw | (length >= `+strconv.Itoa(poolDemandCandidateLimit)+` and (($admitted | length) < length))`) + ` 2>/dev/null)" = "true" ]; then ` +
 		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		preferExecutablePoolDemandScript() + `fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit="+strconv.Itoa(poolDemandCandidateLimit), topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
-		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$legacy_candidates" | jq -r 'length >= 20' 2>/dev/null)" = "true" ]; then ` +
+		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$legacy_candidates" | jq -r 'length >= ` + strconv.Itoa(poolDemandCandidateLimit) + `' 2>/dev/null)" = "true" ]; then ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=0", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
+		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(poolDemandCandidateLimit, topo, true) + `); ` +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -455,7 +457,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 // rather than being converted into false-empty demand.
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
-	preferJQ := poolDemandAdmissionJQ() + ` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:20]`
+	preferJQ := poolDemandAdmissionJQ() + ` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:` + strconv.Itoa(poolDemandCandidateLimit) + `]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }

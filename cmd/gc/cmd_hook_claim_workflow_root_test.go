@@ -81,7 +81,7 @@ func TestDoHookClaimRefusesExpandedWorkflowRootWhenChildIsOwned(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", workflowRootClaimOpts(), ops, &stdout, &stderr)
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doHookClaim(expanded root only) = %d, want 1 (no work); stderr=%s", code, stderr.String())
 	}
@@ -110,7 +110,7 @@ func TestDoHookClaimLostChildRaceDoesNotFallThroughToExpandedRoot(t *testing.T) 
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", workflowRootClaimOpts(), ops, &stdout, &stderr)
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doHookClaim(lost child race) = %d, want 1 (no work); stderr=%s", code, stderr.String())
 	}
@@ -140,7 +140,7 @@ func TestDoHookClaimClaimsReadyStepAheadOfExpandedRoot(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", workflowRootClaimOpts(), ops, &stdout, &stderr)
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doHookClaim(root then step) = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -170,7 +170,7 @@ func TestDoHookClaimStillClaimsRootOnlyWorkflowRoot(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", workflowRootClaimOpts(), ops, &stdout, &stderr)
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doHookClaim(root-only root) = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -193,11 +193,42 @@ func TestDoHookClaimAdoptsOwnedExpandedWorkflowRoot(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", workflowRootClaimOpts(), ops, &stdout, &stderr)
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doHookClaim(owned root) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if result := decodeClaimResult(t, &stdout); result.Reason != "existing_assignment" || result.BeadID != wfRootID {
 		t.Fatalf("result = %+v, want existing_assignment on %s", result, wfRootID)
+	}
+}
+
+// An open expanded root assigned to this session is a continuation anchor, not
+// a fresh root claim. It must be promoted through the idempotent assigned-ready
+// path even though an unassigned expanded root is not independently claimable.
+func TestDoHookClaimPromotesOwnedOpenExpandedWorkflowRoot(t *testing.T) {
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) {
+			return `[` + expandedWorkflowRootRow("worker-b", "open") + `]`, nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			if beadID != wfRootID || assignee != "worker-b" {
+				t.Fatalf("claim(%q, %q), want (%q, worker-b)", beadID, assignee, wfRootID)
+			}
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+				beadmeta.RoutedToMetadataKey:         wfRoute,
+			}}, true, nil
+		},
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", t.TempDir(), workflowRootClaimOpts(), ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(owned open root) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if result := decodeClaimResult(t, &stdout); result.Reason != "ready_assignment" || result.BeadID != wfRootID {
+		t.Fatalf("result = %+v, want ready_assignment on %s", result, wfRootID)
 	}
 }
