@@ -35,8 +35,8 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 9
-	managedOpenCodeHookVersion = 8
-	managedMimoCodeHookVersion = 2
+	managedOpenCodeHookVersion = 9
+	managedMimoCodeHookVersion = 5
 	managedOmpHookVersion      = 2
 )
 
@@ -462,7 +462,11 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// OpenCode loads the workdir plugin for human-launched sessions
 		// too; without the identity guard the plugin runs gc lifecycle
 		// commands in sessions gc does not manage.
-		!hookContains(content, "managedSessionIdentityPresent()") {
+		!hookContains(content, "managedSessionIdentityPresent()") ||
+		// Per-turn text must trail the stable system entries, not share
+		// system[0] with the prime, or the prompt-cache prefix ends at the
+		// prime on every turn (#5732).
+		!hookContains(content, "appendVolatileSystem") {
 		return true
 	}
 	for _, marker := range []string{
@@ -493,14 +497,18 @@ func opencodeHookVersion(content string) int {
 }
 
 // mimocodeHookNeedsUpgrade reports whether an existing managed MiMo Code
-// plugin predates the current managed version. Files without the managed
-// header are user-authored and never upgraded.
+// plugin predates the current managed version or lacks a required marker.
+// Files without the managed header are user-authored and never upgraded.
 func mimocodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
 	if !hookContains(content, "Gas City hooks for MiMo Code.") {
 		return false
 	}
-	return mimocodeHookVersion(content) < managedMimoCodeHookVersion
+	return mimocodeHookVersion(content) < managedMimoCodeHookVersion ||
+		// Per-turn text must trail the stable system entries, not share
+		// system[0] with the prime (#5732). A version-only check would keep
+		// a same-numbered plugin with a different body.
+		!hookContains(content, "appendVolatileSystem")
 }
 
 func mimocodeHookVersion(content string) int {
