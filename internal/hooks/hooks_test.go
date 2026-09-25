@@ -1841,6 +1841,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"pending.child.stdin?.end();",
 		"drainedTurnID",
 		"appendVolatileSystem",
+		"const turns = new Map()",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		"Promise.all([",
@@ -1875,6 +1876,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"Gas City hooks for MiMo Code.",
 		"const GC_MIMOCODE_HOOK_VERSION = 5",
 		"appendVolatileSystem",
+		"const turns = new Map()",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
 		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
@@ -2270,6 +2272,7 @@ export default async function gascityPlugin() {
 		"managedSessionIdentityPresent()",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
+		"const turns = new Map()",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2331,6 +2334,7 @@ Promise.all([]);
 drainedTurnID;
 managedSessionIdentityPresent();
 function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 10"), 1)
@@ -2341,6 +2345,7 @@ function appendVolatileSystem(system, volatile) {}
 	unscopedDrain := bytes.Replace(current, []byte("drainedTurnID;\n"), nil, 1)
 	unguarded := bytes.ReplaceAll(current, []byte("managedSessionIdentityPresent"), []byte("somethingElse"))
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2372,6 +2377,9 @@ function appendVolatileSystem(system, volatile) {}
 	if !opencodeHookNeedsUpgrade(volatileInHeader) {
 		t.Fatal("OpenCode hook that folds the clock line into system[0] did not request upgrade")
 	}
+	if !opencodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("OpenCode hook with directory-wide turn state did not request upgrade")
+	}
 }
 
 func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
@@ -2397,14 +2405,17 @@ func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
 function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
 function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
 `)
 	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 4"), 1)
 	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 6"), 1)
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2420,6 +2431,9 @@ function appendVolatileSystem(system, volatile) {}
 	}
 	if !mimocodeHookNeedsUpgrade(volatileInHeader) {
 		t.Fatal("MiMo Code hook that folds the clock line into system[0] did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("MiMo Code hook with directory-wide turn state did not request upgrade")
 	}
 }
 
