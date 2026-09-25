@@ -64,6 +64,14 @@ scenarios:
     executable: true
     profiles: [claude/tmux-cli, codex/tmux-cli, cursor/tmux-cli, gemini/tmux-cli, kimi/tmux-cli, opencode/tmux-cli, mimocode/tmux-cli, zcode/tmux-cli, pi/tmux-cli, antigravity/tmux-cli]
     requirement_codes: [WC-INPUT-005]
+  - id: input-hook-primed-resume-role-omitted
+    runner: fake-worker
+    phase: phase2
+    kind: input_delivery
+    description: With provider hooks installed, a resume replays the rendered role prompt only for profiles whose hook does not already supply it to every generation; hook-primed profiles get a beacon-led restart turn instead.
+    executable: true
+    profiles: [claude/tmux-cli, codex/tmux-cli, cursor/tmux-cli, gemini/tmux-cli, kimi/tmux-cli, opencode/tmux-cli, mimocode/tmux-cli, zcode/tmux-cli, pi/tmux-cli, antigravity/tmux-cli]
+    requirement_codes: [WC-INPUT-006]
   - id: transcript-diagnostics
     runner: fake-worker
     phase: phase2

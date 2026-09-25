@@ -52,11 +52,26 @@ type BuiltinProviderSpec struct {
 	PathCheck              string
 	SupportsACP            bool
 	SupportsHooks          bool
-	InstructionsFile       string
-	ResumeFlag             string
-	ResumeStyle            string
-	ResumeCommand          string
-	SessionIDFlag          string
+	// HookSuppliesRolePerTurn records that the hook gc stages for this
+	// provider supplies the rendered role prompt to every model generation
+	// (a system-prompt transform running `gc prime --hook` without the
+	// managed SessionStart markers), rather than delivering it once at
+	// session start. When true, a resumed conversation does not need the
+	// role replayed as a user turn: the hook already carries it. The hook
+	// decorates generations but never starts one, so a restart turn is still
+	// required to wake the session.
+	//
+	// Only providers that actually resume a conversation qualify (ResumeFlag
+	// set): groq and cerebras launch the opencode binary and are hook-staged
+	// as opencode, but with no resume flag every restart is a fresh process,
+	// so dropping the role on their "resume" branch would strand a fresh
+	// session unprimed.
+	HookSuppliesRolePerTurn bool
+	InstructionsFile        string
+	ResumeFlag              string
+	ResumeStyle             string
+	ResumeCommand           string
+	SessionIDFlag           string
 	// ForkFlag is the CLI flag that forks a resumed conversation into a new
 	// branch. Combined with ResumeFlag + SessionIDFlag it yields the fork-launch
 	// form (resume a parent brain, fork off it, bind gc's own session id). Empty
@@ -638,10 +653,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:          true,
 		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// The staged .opencode/plugins/gascity.js prepends `gc prime --hook`
+		// to the system prompt on every generation (chat.message and
+		// experimental.chat.system.transform), so the role never has to be
+		// replayed as a user turn on resume.
+		HookSuppliesRolePerTurn: true,
+		InstructionsFile:        "AGENTS.md",
+		ResumeFlag:              "--session",
+		ResumeStyle:             "flag",
+		ACPArgs:                 []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
@@ -660,19 +680,22 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// explicit opt-in until `mimo acp` has equivalent non-interactive
 		// conformance coverage. No mimocode.json is staged — staging one
 		// would clobber user config.
-		DisplayName:      "MiMo Code",
-		Command:          "mimo",
-		Args:             []string{"--never-ask"},
-		PromptMode:       "flag",
-		PromptFlag:       "--prompt",
-		ReadyDelayMs:     8000,
-		ProcessNames:     []string{"mimo", ".mimocode", "node", "bun"},
-		SupportsACP:      true,
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
-		ResumeFlag:       "--session",
-		ResumeStyle:      "flag",
-		ACPArgs:          []string{"acp"},
+		DisplayName:   "MiMo Code",
+		Command:       "mimo",
+		Args:          []string{"--never-ask"},
+		PromptMode:    "flag",
+		PromptFlag:    "--prompt",
+		ReadyDelayMs:  8000,
+		ProcessNames:  []string{"mimo", ".mimocode", "node", "bun"},
+		SupportsACP:   true,
+		SupportsHooks: true,
+		// Same plugin shape as opencode: .mimocode/plugin/gascity.js runs
+		// `gc prime --hook` from the system-prompt transform on every turn.
+		HookSuppliesRolePerTurn: true,
+		InstructionsFile:        "AGENTS.md",
+		ResumeFlag:              "--session",
+		ResumeStyle:             "flag",
+		ACPArgs:                 []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("mimo/mimo-auto", "MiMo Auto (free)"),
@@ -907,6 +930,15 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 		out[name] = cloneBuiltinProviderSpec(spec)
 	}
 	return out
+}
+
+// HookSuppliesRolePerTurn reports whether the builtin provider named name
+// stages a hook that re-supplies the rendered role prompt on every model
+// generation. Unknown names report false. This reads the catalog directly so
+// hot paths (session start preparation) do not clone every spec per call.
+func HookSuppliesRolePerTurn(name string) bool {
+	spec, ok := builtinProviderSpecs[name]
+	return ok && spec.HookSuppliesRolePerTurn
 }
 
 // CanonicalProfileIdentity returns the explicit compatibility identity for one

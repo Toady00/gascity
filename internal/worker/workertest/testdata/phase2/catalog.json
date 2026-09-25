@@ -50,6 +50,12 @@
       "scenario_id": "input-pre-claim-resume-restart"
     },
     {
+      "code": "WC-INPUT-006",
+      "group": "input_delivery",
+      "description": "A resumed session whose installed provider hook supplies the rendered role prompt to every generation delivers the beacon plus the configured nudge (the beacon alone when none is configured) as its restart turn, never the rendered prompt; every other profile keeps the rendered prompt in the restart turn.",
+      "scenario_id": "input-hook-primed-resume-role-omitted"
+    },
+    {
       "code": "WC-TX-003",
       "group": "transcript",
       "description": "Malformed or torn transcript data is reported as degraded history or a fail-closed load error instead of clean normalized history.",
