@@ -1825,6 +1825,78 @@ func TestResolveProviderOpenCodeStartupDialogPolicyInheritedByWrapper(t *testing
 	}
 }
 
+// TestResolvedProviderHookSuppliesRolePerTurn pins the per-turn role-hook
+// capability as a family fact: builtin opencode/mimocode carry it, a wrapped
+// custom provider inherits it through BuiltinAncestor, providers whose hooks
+// deliver context once at SessionStart (pi) or have no hook (zcode) do not,
+// and a fully custom provider with no builtin ancestor never claims it.
+func TestResolvedProviderHookSuppliesRolePerTurn(t *testing.T) {
+	var nilProvider *ResolvedProvider
+	if nilProvider.HookSuppliesRolePerTurn() {
+		t.Fatal("nil ResolvedProvider must report false")
+	}
+
+	for _, tc := range []struct {
+		provider string
+		want     bool
+	}{
+		{provider: "opencode", want: true},
+		{provider: "mimocode", want: true},
+		{provider: "pi", want: false},
+		{provider: "claude", want: false},
+		{provider: "codex", want: false},
+		{provider: "zcode", want: false},
+	} {
+		agent := &Agent{Name: "worker", Provider: tc.provider}
+		providers := map[string]ProviderSpec{tc.provider: BuiltinProviderAlias(tc.provider)}
+		rp, err := ResolveProvider(agent, nil, providers, func(string) (string, error) { return "/usr/bin/x", nil })
+		if err != nil {
+			t.Fatalf("ResolveProvider(%s): %v", tc.provider, err)
+		}
+		if got := rp.HookSuppliesRolePerTurn(); got != tc.want {
+			t.Errorf("%s HookSuppliesRolePerTurn() = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+
+	base := "builtin:opencode"
+	wrapped := map[string]ProviderSpec{"wrapped-opencode": {Base: &base}}
+	rp, err := ResolveProvider(&Agent{Name: "worker", Provider: "wrapped-opencode"}, nil, wrapped, lookPathOnly("opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(wrapped-opencode): %v", err)
+	}
+	if !rp.HookSuppliesRolePerTurn() {
+		t.Errorf("wrapped base=builtin:opencode HookSuppliesRolePerTurn() = false, want true (inherited via BuiltinAncestor %q)", rp.BuiltinAncestor)
+	}
+
+	standalone := ""
+	custom := map[string]ProviderSpec{"custom": {Base: &standalone, Command: "custom-agent", SupportsHooks: boolPtr(true)}}
+	rp, err = ResolveProvider(&Agent{Name: "worker", Provider: "custom"}, nil, custom, lookPathOnly("custom-agent"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(custom): %v", err)
+	}
+	if rp.HookSuppliesRolePerTurn() {
+		t.Error("fully custom provider with no builtin ancestor must not claim a per-turn role hook")
+	}
+
+	// An explicit standalone provider (base = "") that happens to carry a
+	// builtin NAME is not the builtin: BuiltinFamily is empty even though
+	// resolveProviderKind still reports the name. The capability is a fact
+	// about the builtin overlay, so it must follow BuiltinAncestor alone.
+	for _, name := range []string{"opencode", "mimocode"} {
+		shadow := map[string]ProviderSpec{name: {Base: &standalone, Command: name + "-custom", SupportsHooks: boolPtr(true)}}
+		rp, err := ResolveProvider(&Agent{Name: "worker", Provider: name}, nil, shadow, lookPathOnly(name+"-custom"))
+		if err != nil {
+			t.Fatalf("ResolveProvider(standalone %s): %v", name, err)
+		}
+		if rp.BuiltinAncestor != "" {
+			t.Fatalf("standalone %s BuiltinAncestor = %q, want empty", name, rp.BuiltinAncestor)
+		}
+		if rp.HookSuppliesRolePerTurn() {
+			t.Errorf("standalone provider named %q (base = \"\") must not claim a per-turn role hook (Kind=%q Name=%q)", name, rp.Kind, rp.Name)
+		}
+	}
+}
+
 // --- Tri-state capability bool tests ---
 //
 // These verify the three-way *bool semantics for SupportsHooks,

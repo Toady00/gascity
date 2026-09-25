@@ -3437,6 +3437,11 @@ type Agent struct {
 	// the agent is treated as hook-enabled for startup behavior: no prime
 	// instruction in beacon and no delayed nudge. Interacts with
 	// install_agent_hooks — set this instead when hooks are pre-installed.
+	// Set to false for a provider wrapped over builtin opencode or mimocode
+	// whose overridden command does not load the staged plugin directory:
+	// those builtins' hooks supply the role prompt to every generation, so a
+	// hook-enabled resume delivers only the beacon and configured nudge, and
+	// a session without the plugin would otherwise resume unprimed.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:

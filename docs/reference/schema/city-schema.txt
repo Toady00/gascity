@@ -287,7 +287,7 @@
         },
         "hooks_installed": {
           "type": "boolean",
-          "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed."
+          "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed.\nSet to false for a provider wrapped over builtin opencode or mimocode\nwhose overridden command does not load the staged plugin directory:\nthose builtins' hooks supply the role prompt to every generation, so a\nhook-enabled resume delivers only the beacon and configured nudge, and\na session without the plugin would otherwise resume unprimed."
         },
         "session_setup": {
           "items": {
