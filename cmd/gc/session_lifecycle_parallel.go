@@ -1827,10 +1827,11 @@ func restartPromptNudge(prompt, nudge string) string {
 // All three legs must hold: the resolved provider's builtin family stages a
 // per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn), that
 // hook is actually installed for this agent (TemplateParams.HookEnabled, the
-// config.AgentHasHooks verdict — an explicit hooks_installed = false or a
-// missing install_agent_hooks entry means no plugin, so the nudge stays the
-// only carrier), and the session is not ACP, whose transport never loads the
-// CLI plugin and always receives the prompt through the nudge. Providers
+// config.AgentHasHooks verdict — true by default for opencode/mimocode since
+// their overlay is staged for every launch; an explicit hooks_installed =
+// false means no plugin, so the nudge stays the only carrier), and the
+// session is not ACP, whose transport never loads the CLI plugin and always
+// receives the prompt through the nudge. Providers
 // whose hooks prime once at SessionStart (pi, codex, antigravity, claude via
 // settings) are excluded by the family fact, not by SupportsHooks, which is
 // true for them as well.
