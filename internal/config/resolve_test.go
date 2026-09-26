@@ -2060,6 +2060,48 @@ func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 	}
 }
 
+// TestAgentHasHooks_ManagedOverlayHooksByDefault pins the default for
+// builtins whose bundled overlay hook gc stages for the launch family
+// unconditionally and which primes the session on its own (opencode and
+// mimocode): the agent is hook-enabled without install_agent_hooks or
+// hooks_installed. hooks_installed = false stays the explicit opt-out, an
+// explicit standalone provider (base = "") that carries the builtin name has
+// no builtin family and is not covered, and a wrapped provider inherits the
+// default through its ancestor.
+func TestAgentHasHooks_ManagedOverlayHooksByDefault(t *testing.T) {
+	ws := &Workspace{Name: "test"}
+	for _, name := range []string{"opencode", "mimocode"} {
+		if !AgentHasHooks(&Agent{Name: "worker"}, ws, name, nil) {
+			t.Errorf("%s with no install_agent_hooks should have hooks by default (overlay staged unconditionally)", name)
+		}
+		if !AgentHasHooks(&Agent{Name: "worker"}, ws, name, map[string]ProviderSpec{name: BuiltinProviderAlias(name)}) {
+			t.Errorf("%s via builtin alias should have hooks by default", name)
+		}
+		no := false
+		if AgentHasHooks(&Agent{Name: "worker", HooksInstalled: &no}, ws, name, nil) {
+			t.Errorf("%s with hooks_installed = false must opt out", name)
+		}
+		standalone := ""
+		shadow := map[string]ProviderSpec{name: {Base: &standalone, Command: name + "-custom"}}
+		if AgentHasHooks(&Agent{Name: "worker"}, ws, name, shadow) {
+			t.Errorf("standalone [providers.%s] base = \"\" has no builtin family and must not be hook-enabled by default", name)
+		}
+	}
+	base := "builtin:opencode"
+	wrapped := map[string]ProviderSpec{"wrapped-opencode": {Base: &base}}
+	if !AgentHasHooks(&Agent{Name: "worker"}, ws, "wrapped-opencode", wrapped) {
+		t.Error("wrapped base=builtin:opencode should inherit the managed-overlay default")
+	}
+	// Providers whose staged hook primes once at SessionStart and defers to
+	// the launch-time prompt keep the pre-existing default: not hook-enabled
+	// unless install_agent_hooks or hooks_installed says so.
+	for _, name := range []string{"pi", "codex", "antigravity", "gemini", "kimi", "kiro", "cursor", "copilot", "omp"} {
+		if AgentHasHooks(&Agent{Name: "worker"}, ws, name, nil) {
+			t.Errorf("%s must not be hook-enabled by default", name)
+		}
+	}
+}
+
 func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini", "opencode"}}
@@ -2110,8 +2152,10 @@ func TestAgentHasHooks_AgentLevelInstallHooks(t *testing.T) {
 	if !AgentHasHooks(agent, ws, "copilot", nil) {
 		t.Error("agent install_agent_hooks should be checked")
 	}
-	if AgentHasHooks(agent, ws, "opencode", nil) {
-		t.Error("opencode not in agent install_agent_hooks")
+	// codex has no managed-overlay default (unlike opencode, which is
+	// hook-enabled regardless of the list), so it is the right negative.
+	if AgentHasHooks(agent, ws, "codex", nil) {
+		t.Error("codex not in agent install_agent_hooks")
 	}
 }
 

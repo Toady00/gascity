@@ -425,7 +425,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// below): when the rendered prompt is inlined under the beacon, the agent
 	// already holds the exact bytes `gc prime` would hand back, so the
 	// instruction costs a turn and duplicates the context it just received.
-	includePrimeInstruction := !hasHooks && prompt == ""
+	// Hook status is transport-aware: an ACP session never loads the CLI
+	// plugin overlay (promptDelivery just forwards the beacon), so even a
+	// hook-enabled provider (opencode/mimocode are hook-enabled by default)
+	// needs the instruction there or a promptless ACP agent lands unprimed.
+	isACP := sessionTransport == config.SessionTransportACP
+	includePrimeInstruction := prompt == "" && (!hasHooks || isACP)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
@@ -722,7 +727,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == config.SessionTransportACP,
+		IsACP:            isACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}

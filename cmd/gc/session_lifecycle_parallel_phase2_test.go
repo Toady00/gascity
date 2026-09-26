@@ -136,6 +136,37 @@ func TestPhase2HookInstalledResumeInputDelivery(t *testing.T) {
 	}
 }
 
+// TestPhase2DefaultConfigurationHookPrimedResume pins that the hook-primed
+// resume branch is reachable with the DEFAULT configuration: no
+// install_agent_hooks, no hooks_installed. The runtime stages the launch
+// family's overlay plugin for every opencode/mimocode session, so those
+// profiles are hook-enabled out of the box and WC-INPUT-006 must hold for
+// them without any hook declaration. (TestPhase2HookInstalledResumeInputDelivery
+// covers the explicit-declaration shape for every profile.)
+func TestPhase2DefaultConfigurationHookPrimedResume(t *testing.T) {
+	reporter := newPhase2Reporter(t, "phase2-input-delivery-default-hook-primed")
+
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	for _, tc := range selectedPhase2ProviderCases(t) {
+		if !phase2HookSuppliesRolePerTurnFamilies[tc.family] {
+			continue
+		}
+		tc := tc
+		t.Run(string(tc.profileID), func(t *testing.T) {
+			prepared := preparePhase2Start(t, tc, "already-started", map[string]string{
+				"initial_message": "Do the first task.",
+			})
+			if len(prepared.candidate.tp.Hints.InstallAgentHooks) != 0 {
+				t.Fatalf("fixture declares install_agent_hooks %v; this test models the default configuration", prepared.candidate.tp.Hints.InstallAgentHooks)
+			}
+			reporter.Require(t, hookPrimedResumeRoleResult(tc, prepared))
+		})
+	}
+}
+
 func TestPhase2HookEnabledClaudeFirstTurnStartupPayload(t *testing.T) {
 	tc := phase2ProviderCaseForFamily(t, "claude")
 	prepared := preparePhase2Start(t, tc, "", map[string]string{
