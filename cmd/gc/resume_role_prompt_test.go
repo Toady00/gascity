@@ -282,12 +282,12 @@ func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	}
 }
 
-// TestResumeOnHookPrimedProviderWithBlankNudgeStillGetsRestartTurn pins the
-// idle-REPL trap: with no configured nudge, the hook-primed resume must still
-// submit a non-empty restart turn (tmux and herdr both skip an empty nudge,
-// and the hook only decorates a generation the agent has to start). The turn
-// is exactly the beacon line — no template, no separator.
-func TestResumeOnHookPrimedProviderWithBlankNudgeStillGetsRestartTurn(t *testing.T) {
+// TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle pins that with no
+// configured nudge the hook-primed resume submits NO restart turn. The role
+// is already in the system prompt through the plugin, so a content-free wake
+// turn only buys a generation that acknowledges and waits; the next human
+// message, queued nudge, or reconcile-tick claim backstop starts a real turn.
+func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
 	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
@@ -301,15 +301,16 @@ func TestResumeOnHookPrimedProviderWithBlankNudgeStillGetsRestartTurn(t *testing
 	}
 
 	prepared := prepareResumeRoleStart(t, tp, "resume-key")
-	want := runtime.FormatBeaconAt("resume-role-city", "worker", false, time.Unix(0, 0))
-	if strings.TrimSpace(prepared.cfg.Nudge) == "" {
-		t.Fatal("cfg.Nudge is empty: the resumed session would land on a bare idle REPL")
+	if prepared.cfg.Nudge != "" {
+		t.Fatalf("cfg.Nudge = %q, want no restart turn when no nudge is configured", prepared.cfg.Nudge)
 	}
-	if prepared.cfg.Nudge != want {
-		t.Fatalf("cfg.Nudge = %q, want exactly the beacon %q", prepared.cfg.Nudge, want)
+	if prepared.cfg.PromptSuffix != "" || prepared.cfg.PromptFlag != "" {
+		t.Fatalf("launch prompt = (%q, %q), want none on resume", prepared.cfg.PromptSuffix, prepared.cfg.PromptFlag)
 	}
-	if strings.Contains(prepared.cfg.Nudge, "Base worker prompt") || strings.Contains(prepared.cfg.Nudge, startupPromptNudgeSeparator) {
-		t.Fatalf("cfg.Nudge = %q, want no template and no separator", prepared.cfg.Nudge)
+	// The hook still keys on the delivered marker; the role reaches the model
+	// through the plugin, so the session is primed even though nothing is sent.
+	if prepared.cfg.Env[startupPromptDeliveredEnv] != "1" {
+		t.Fatalf("%s = %q, want 1", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])
 	}
 }
 

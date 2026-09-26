@@ -1845,16 +1845,20 @@ func resumeRolePromptSuppliedByHook(tp TemplateParams) bool {
 // prompt to every generation, in which case replaying it here would persist a
 // duplicate copy of the role as a user message on every wake.
 //
-// The hook only decorates a generation the agent has already started; it
-// never starts one, and both tmux and herdr skip an empty nudge. So the
-// hook-primed branch still has to submit a real, non-empty turn: the beacon
-// line (`[city] alias • ts`, the same line the launch path ships when there
-// is no prompt) followed by the configured nudge when there is one, or the
-// beacon alone when there is not. The beacon always leads, matching the shape
-// of the pre-existing restart payload (whose template began with it), so the
-// restart turn is never the template and never empty.
+// On that hook-primed branch the turn is the beacon line (`[city] alias • ts`)
+// followed by the configured nudge when there is one: the nudge is the reason
+// for the turn, and the beacon identifies the wake. When no nudge is
+// configured there is no restart turn at all. The role is already in the
+// system prompt through the plugin, so a content-free wake turn only buys a
+// generation that acknowledges and waits; landing idle is the correct state,
+// and the next human message, queued nudge, or reconcile-tick claim backstop
+// (nudgeStalledPoolClaims) starts a real turn. Both tmux and herdr skip an
+// empty nudge, so "" delivers nothing. The turn is never the template.
 func resumeStartupNudge(tp TemplateParams) string {
 	if resumeRolePromptSuppliedByHook(tp) {
+		if strings.TrimSpace(tp.Hints.Nudge) == "" {
+			return ""
+		}
 		return prependStartupPromptToNudge(tp.Beacon, tp.Hints.Nudge)
 	}
 	return restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
