@@ -300,6 +300,9 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("%s = %q, want 1 when restart prompt is delivered", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+	case hookSuppliesRole:
+		return workertest.Pass(tc.profileID, requirement,
+			fmt.Sprintf("%s on a hook-primed provider resumes with the configured nudge only, or idle when none is configured (role supplied by the hook), without replaying initial_message", label)).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, requirement,
 			fmt.Sprintf("%s receives a restart prompt on resume without replaying initial_message", label)).WithEvidence(evidence)
@@ -362,7 +365,7 @@ func hookPrimedResumeRoleResult(tc phase2ProviderCase, prepared *preparedStart) 
 			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial_message on resume", prepared.cfg.Nudge)).WithEvidence(evidence)
 	case wantHookSuppliesRole:
 		return workertest.Pass(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
-			"hook-primed provider resumes with a beacon-led restart turn (configured nudge, no role prompt replayed as a user turn)").WithEvidence(evidence)
+			"hook-primed provider resumes with the configured nudge as its restart turn, or idle when none is configured; the role prompt is never replayed as a user turn").WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementInputHookPrimedResumeRoleOmitted,
 			"SessionStart-primed provider still receives the rendered prompt in its restart turn").WithEvidence(evidence)
@@ -377,24 +380,22 @@ func phase2Beacon(prepared *preparedStart) string {
 }
 
 // hookPrimedRestartTurnMismatch returns "" when a hook-primed profile's
-// resume nudge is the expected restart turn: exactly the beacon when no
-// nudge is configured (never empty — the hook decorates a generation but
-// does not start one), otherwise beacon + separator + configured nudge, and
-// never the rendered template. Non-empty return is the failure detail.
+// resume nudge is the expected restart turn: exactly "" when no nudge is
+// configured (the role is in the system prompt via the plugin, so the
+// session resumes idle and the next message, queued nudge, or claim backstop
+// starts a turn), otherwise beacon + separator + configured nudge, and never
+// the rendered template. Non-empty return is the failure detail.
 func hookPrimedRestartTurnMismatch(prepared *preparedStart) string {
 	nudge := prepared.cfg.Nudge
-	if strings.TrimSpace(nudge) == "" {
-		return "cfg.Nudge is empty, want a non-empty restart turn so the resumed session does not land idle"
-	}
 	if strings.Contains(nudge, "Base worker prompt") {
 		return fmt.Sprintf("cfg.Nudge = %q, want no replayed role prompt when the provider hook supplies it to every generation", nudge)
 	}
-	want := phase2Beacon(prepared)
+	want := ""
 	if configured := prepared.candidate.tp.Hints.Nudge; configured != "" {
-		want += startupPromptNudgeSeparator + configured
+		want = phase2Beacon(prepared) + startupPromptNudgeSeparator + configured
 	}
 	if nudge != want {
-		return fmt.Sprintf("cfg.Nudge = %q, want beacon-led restart turn %q", nudge, want)
+		return fmt.Sprintf("cfg.Nudge = %q, want restart turn %q", nudge, want)
 	}
 	return ""
 }
