@@ -757,11 +757,22 @@ func advanceSessionDrainsWithSessionsTraced(
 // advanceSessionDrainsWithSessionsTraced, and completeDrain is always followed by dt.remove +
 // continue — so the store write is the sole observable effect (all completeDrain
 // tests assert on store.Get). With no store there is nothing to persist.
+//
+// The recorded reason and the carried standing intent come from the session's
+// live park evidence at completion, not from ds.reason alone
+// (DrainCompletionSleepReason): beginSessionDrainInfo keeps the FIRST reason,
+// so a park that landed while an idle drain was in flight must still complete
+// as the park, and a finite hold that expired mid-drain must complete as the
+// park that still stands (a wait it was layered over) or as an ordinary idle
+// sleep, never stamping a hold nothing is holding.
+// finalizeDrainAckStoppedSession reads the same evidence.
 func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState, clk clock.Clock) {
 	if sessFront == nil {
 		return
 	}
-	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
+	now := clk.Now()
+	reason := sessions.DrainCompletionSleepReason(info, ds.reason, now)
+	batch := sessions.CompleteDrainPatch(now, string(reason), string(sessions.ParkedSleepReason(info, now)), info.WakeMode == "fresh")
 	_ = sessFront.ApplyPatch(info.ID, batch)
 }
 
