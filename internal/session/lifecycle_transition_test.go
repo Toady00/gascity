@@ -412,7 +412,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "clear expired user hold",
-			patch: ClearExpiredHoldPatch("user-hold", "user-hold"),
+			patch: ClearExpiredHoldPatch("user-hold", "user-hold", ""),
 			want: MetadataPatch{
 				"held_until":   "",
 				"sleep_reason": "",
@@ -421,7 +421,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "clear expired non-hold timer",
-			patch: ClearExpiredHoldPatch("idle", ""),
+			patch: ClearExpiredHoldPatch("idle", "", ""),
 			want: MetadataPatch{
 				"held_until": "",
 			},
@@ -431,7 +431,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			// user-hold intent survives, so expiry must key the intent
 			// release on the intent, not on the displayed reason.
 			name:  "clear expired hold releases a user-hold intent under an idle reason",
-			patch: ClearExpiredHoldPatch("idle", "user-hold"),
+			patch: ClearExpiredHoldPatch("idle", "user-hold", ""),
 			want: MetadataPatch{
 				"held_until":   "",
 				"sleep_intent": "",
@@ -440,9 +440,21 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		{
 			// wait_hold, not held_until, is a wait gate's own timer.
 			name:  "clear expired hold leaves a wait-hold intent alone",
-			patch: ClearExpiredHoldPatch("idle", "wait-hold"),
+			patch: ClearExpiredHoldPatch("idle", "wait-hold", "true"),
 			want: MetadataPatch{
 				"held_until": "",
+			},
+		},
+		{
+			// A suspend that landed on a wait-parked seat overwrote the
+			// wait's intent; the wait still stands when the suspend expires,
+			// so the released vocabulary becomes wait-hold, not blank.
+			name:  "clear expired hold hands the park back to a standing wait",
+			patch: ClearExpiredHoldPatch("user-hold", "user-hold", "true"),
+			want: MetadataPatch{
+				"held_until":   "",
+				"sleep_reason": "wait-hold",
+				"sleep_intent": "wait-hold",
 			},
 		},
 		{

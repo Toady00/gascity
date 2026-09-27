@@ -877,7 +877,25 @@ Authoritative precedence:
 2. a transient `sleep_intent` only describes an in-flight or recovered stop
    path; a standing hold intent additionally records that an operator or a
    wait gate parked the session, and is carried into `sleep_reason` at drain
-   completion so pool-slot and crash-recovery readers see the park
+   completion so pool-slot and crash-recovery readers see the park. The two
+   parks are independent and each is read from its own live marker: a wait
+   park is a non-empty `wait_hold`; a suspend is `user-hold` vocabulary (in
+   `sleep_intent` or the recorded `sleep_reason`) paired with a future
+   `held_until` — `held_until` alone is a heartbeat keep-alive. When both
+   stand the suspend is the one named in the markers, and releasing either
+   park (the hold expiring, the wait resolving, failing, expiring or being
+   canceled) hands the markers to the park that still stands instead of
+   blanking them; registering a sleeping wait never overwrites a standing
+   suspend's intent. Both drain completion writers read this evidence when
+   they run rather than the reason the drain began with: a park that lands
+   during an in-flight idle drain completes as the park; a hold that expired
+   before the writer runs completes as the surviving park, or as an ordinary
+   `idle` sleep when none survives; and a parked pool seat keeps its bead even
+   when no claim is visible to the drain-ack close gate. A writer is not
+   always reached: when a hold expires while the runtime is still alive and
+   the seat has wake demand (e.g. a ready claim), the timer heal releases the
+   hold first and the wake demand cancels the cancelable `user-hold` drain,
+   so the seat keeps running and no completion is recorded
 3. `config_wake_suppressed` is derived from lifecycle state plus
    suppression rules; it is not an independent lifecycle state
 4. blocker and snapshot fields are diagnostic, not state-machine inputs

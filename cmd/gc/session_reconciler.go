@@ -800,7 +800,18 @@ func finalizeDrainAckStoppedSession(
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 		hasAssignedWork = true
 	}
-	if closeIfUnassigned && !hasAssignedWork {
+	// A standing hold completes as the park, whether or not the close gate can
+	// see a claim: the bead stays open (its wait or hold is keyed to this
+	// session, so closing it would orphan the release), any claim stays with
+	// it, and the park is recorded as the sleep reason. The pool close gate
+	// below would otherwise retire a parked pool seat whose claim is invisible
+	// to the open/in_progress assigned-work query (none yet, or a raw blocked
+	// row). Evidence is read live (ParkedSleepReason): a finite hold that
+	// expired while this drain was in flight was already healed by this tick's
+	// timer pass, so its seat completes as whatever park still stands (a wait
+	// the suspend was layered over) or as an ordinary drain.
+	parked := sessionpkg.ParkedSleepReason(info, clk.Now())
+	if closeIfUnassigned && parked == "" && !hasAssignedWork {
 		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, info, "drained", clk.Now().UTC(), stderr, true) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
@@ -851,20 +862,20 @@ func finalizeDrainAckStoppedSession(
 		}
 	}
 	batch := sessionpkg.AcknowledgeDrainPatch(clk.Now().UTC(), info.WakeMode == "fresh")
-	if hasAssignedWork {
+	if parked != "" || hasAssignedWork {
 		// A drain-acked seat sleeps as "idle" unless it carries a standing hold,
 		// in which case the hold IS the reason it slept. The distinction is not
 		// cosmetic: the pool-slot gate (isPoolSessionSlotFreeableInfo) reads only
 		// state + sleep_reason, so labeling a parked seat "idle" makes its slot
 		// freeable and lets the stranded repair unclaim its work and close its
 		// bead — destroying the park instead of honoring it
-		// (gastownhall/gascity#5561). The drain-timeout sibling already passes the
-		// drain's own reason, which for a held drain is this same intent.
+		// (gastownhall/gascity#5561). completeDrain selects its reason from the
+		// same live evidence, so both writers land the same seat state.
 		drainReason := sessionpkg.SleepReasonIdle
-		if standing := sessionpkg.StandingSleepIntent(info.SleepIntent); standing != "" {
-			drainReason = standing
+		if parked != "" {
+			drainReason = parked
 		}
-		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(drainReason), info.SleepIntent, info.WakeMode == "fresh")
+		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(drainReason), string(parked), info.WakeMode == "fresh")
 	}
 	// A drain-ack that completes a restart-request cycle (gc session reset →
 	// agent drain-ack) must also consume restart_requested. The drain-ack
@@ -897,7 +908,12 @@ func finalizeDrainAckStoppedSession(
 		dt.remove(info.ID)
 	}
 	recordStopped(true)
-	if hasAssignedWork {
+	// A parked seat that still holds a claim is not the #2293 anomaly this
+	// event alarms on (a seat that drain-acked "done" while a row still names
+	// it): it deliberately kept the row and sleeps until its wait or hold is
+	// released. Alarming would invite recovery tooling to reassign work the
+	// parked session still owns.
+	if hasAssignedWork && parked == "" {
 		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, template, template, name, clk.Now().UTC(), rec, stderr)
 	}
 	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
