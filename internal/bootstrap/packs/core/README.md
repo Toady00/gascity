@@ -20,7 +20,7 @@ none requires per-city configuration.
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
-| **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
+| **`nudge-on-route`** | **condition** | **Nudge newly routed work and retry unsuccessful delivery** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
@@ -36,9 +36,11 @@ set"*). Without that nudge, a bead whose `metadata.gc.routed_to` is newly set
 or changed sits unclaimed against any worker not currently in an active turn
 cycle. This order ships that workaround.
 
-**Event contract.** Triggers on `bead.updated`. For each event whose bead
-carries a non-empty `metadata.gc.routed_to`, nudges that target with
-`check for assigned work`.
+The city-scoped condition checks both `bead.created` and `bead.updated`,
+including flat log payloads and nested API payloads. A route stamped at creation
+does not need a later update to trigger notification. Before sending, the script
+checks the current bead: it must be open, unassigned, routed, and present in the
+ready query. Claimed or closed work is discarded; blocked work stays pending.
 
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
@@ -50,23 +52,47 @@ has no members (a single-session agent or an explicit slot). Without this,
 nudges to a pool base silently no-op — defeating the warm-idle pool wake this
 order exists to provide.
 
-**Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
-reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
-state's last-seen timestamp is refreshed on every sighting and the pair is
-never pruned-then-renudged while the routing is live.
+The script atomically records an event cursor, pending deliveries, retry times,
+and the last successfully notified route in
+`$GC_PACK_STATE_DIR/nudge-on-route-delivery.json`. A complete event read advances
+the cursor together with pending work, before delivery. Failed reads retain the
+cursor; failed sends stay pending without requiring another event. Retry delays
+grow from one minute to a maximum of one hour. Blocked work is rechecked after
+one minute, or sooner when its bead changes. This includes held and deferred
+work. Successful requests to the nudge CLI include requests accepted
+by its durable queue; the supervisor owns subsequent runtime delivery.
+Each run processes at most 20 due beads and leaves the remainder pending. Each
+eligible routing receives its own notification, even when targets are shared.
 
-**Dedup state.** `$GC_PACK_STATE_DIR/nudge-on-route-state.json` — a JSON object
-mapping `"<bead>|<routed_to>"` to an ISO timestamp. `GC_PACK_STATE_DIR`
-resolves per city + pack, so multi-city installs never cross-pollinate. Entries
-older than the retention window are pruned on each run.
+Repeated observations of the same route do not resend. A claim/release or a
+change to another route makes the work eligible again. A process crash after
+nudge acceptance but before saving success can cause a duplicate; this is
+at-least-once delivery, not an exactly-once promise.
 
-**Configuration** (all optional, via `[order.env]` or the controller env):
+First installation, a reset event log, and gaps over 2,000 events recover from
+`gc ready --status=open`, which federates HQ, rigs, relocated graph stores, and
+ephemeral work, instead of walking the entire event history. A failed scope read
+prevents committing the snapshot and schedules a retry with backoff.
+Because these reads are federated, an unavailable rig can delay notifications
+city-wide. After repeated read failures, recovery may wait up to one hour for
+the next attempt; pending work is retained throughout the outage.
+Smaller gaps use buffered sequence replay. An irrelevant tail of 500 events
+triggers a maintenance run to keep later checks bounded. The order's own
+tracking events cannot continuously retrigger it.
 
-| Variable | Default | Meaning |
-| -------- | ------- | ------- |
-| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `2m` | Event lookback window |
-| `GC_NUDGE_ON_ROUTE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
-| `GC_NUDGE_ON_ROUTE_MESSAGE` | `check for assigned work` | Nudge text |
+The previous success map is imported on upgrade, but its cursor is not trusted:
+the previous version could advance it past a failed delivery. Time-window and
+retention overrides (`GC_NUDGE_ON_ROUTE_WINDOW`, `GC_NUDGE_ON_ROUTE_LOOKBACK`,
+`GC_NUDGE_ON_ROUTE_RETENTION`) no longer govern correctness. The nudge text can
+still be overridden with `GC_NUDGE_ON_ROUTE_MESSAGE` through `[order.env]` or
+the controller environment. Its default asks the recipient to run
+`gc hook --claim --json` and execute any claimed work.
+
+Keep the order's work gate enabled and `idempotent` unset. The script also
+serializes manual runs using `flock`, or `shlock` on macOS. It requires Bash,
+jq, and one of those locking utilities. Existing city-level overrides and skip
+entries retain the `nudge-on-route` name; rig-specific overrides must move to
+the city-scoped order.
 
 ## `cascade-nudge-on-blocker-close`
 

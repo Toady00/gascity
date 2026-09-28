@@ -80,10 +80,18 @@ func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string)
 	}
 }
 
-// TestNudgeOnRouteOrder pins the nudge-on-route order's event contract: it wakes
-// on bead.updated and runs the nudge-on-route script.
+// The condition order must have a single city-scoped writer for its outbox.
 func TestNudgeOnRouteOrder(t *testing.T) {
-	assertEventExecOrder(t, "nudge-on-route.toml", "bead.updated", "nudge-on-route.sh")
+	o := readOrder(t, "nudge-on-route.toml")
+	if err := orders.Validate(o); err != nil {
+		t.Fatal(err)
+	}
+	if o.Trigger != "condition" || o.Check == "" || !o.IsExec() || !o.IsCityScoped() {
+		t.Fatalf("route notifications require a city-scoped condition exec: %+v", o)
+	}
+	if o.NoWorkGate || o.Idempotent {
+		t.Fatal("route notifications require the fail-closed single-flight gate")
+	}
 }
 
 // TestCascadeNudgeOnBlockerCloseOrder pins the cascade-nudge order's event
@@ -383,34 +391,5 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestNudgeOnRouteReadsCreatedEventsSinceLastSeq guards two silent-drop paths
-// (#4382, sys-8war2): routing stamped in the CREATE payload only ever emits
-// bead.created, so the script must read that type too; and the controller
-// fires this order on its own dispatch cadence, so a fixed wall-clock lookback
-// drops every routing event between two runs — the script must cut on the
-// high-water event seq it persisted last run, and tolerate both the nested
-// ({"bead": …}) and flat bead payload shapes `gc events` emits (#5968).
-func TestNudgeOnRouteReadsCreatedEventsSinceLastSeq(t *testing.T) {
-	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
-	if err != nil {
-		t.Fatalf("reading nudge-on-route.sh: %v", err)
-	}
-	body := string(data)
-	for _, want := range []string{
-		`.type == "bead.created"`,
-		`.type == "bead.updated"`,
-		`(.seq // 0) > $last`,
-		`(.payload.bead // .payload)`,
-		"nudge-on-route-seq",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("nudge-on-route.sh must read created+updated events past the persisted seq; missing %q", want)
-		}
-	}
-	if strings.Contains(body, "--type bead.updated") {
-		t.Errorf("nudge-on-route.sh must not filter to bead.updated only")
 	}
 }
