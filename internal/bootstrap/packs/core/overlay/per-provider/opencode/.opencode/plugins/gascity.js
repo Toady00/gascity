@@ -12,7 +12,11 @@
 //   - experimental.session.compacting → gc handoff --auto "context cycle"
 //     and inject the handoff confirmation into the compaction context
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
-//     nudges, and unread mail into the system prompt for each turn
+//     nudges, and unread mail into the system prompt for each turn. The
+//     cached prime is prepended to system[0] so the role stays at the head;
+//     the per-turn text (nudges with their clock line, unread mail) is
+//     appended as a trailing system entry so it lands after every stable
+//     entry and the provider's prompt-cache prefix survives across turns.
 //
 // Injection deliberately does NOT use chat.message. OpenCode awaits that hook
 // before it persists the user's message (SessionPrompt calls updateMessage /
@@ -32,7 +36,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 // Every gc call this plugin makes shares one timeout. Optional per-turn
 // injection used to carry a shorter budget of its own, but that was justified
@@ -202,11 +206,13 @@ export default async function gascityPlugin({ directory, client }) {
   // drained items land in whichever generation happened to win the race.
   //
   // Track the turn a user message opened and let the consumptive commands run
-  // once per turn. When no turn is known — events not delivered, or a payload
-  // without the fields below — this falls back to the previous behavior of
-  // running them every time, so nudges are never silently withheld.
+  // once per turn; later generations of the same turn repeat that turn's
+  // text. When no turn is known — events not delivered, or a payload without
+  // the fields below — this falls back to the previous behavior of running
+  // them every time, so nudges are never silently withheld.
   let currentTurnID = "";
   let drainedTurnID = null;
+  let turnVolatile = Promise.resolve("");
 
   async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
@@ -219,19 +225,54 @@ export default async function gascityPlugin({ directory, client }) {
     return existing ? prefix + "\n\n" + existing : prefix;
   }
 
-  async function buildPrefix() {
-    const prime = await readPrime();
-    if (currentTurnID && drainedTurnID === currentTurnID) {
-      return prime;
-    }
-    // Claim the turn before awaiting so concurrent generations cannot both
-    // reach the drain.
-    drainedTurnID = currentTurnID;
+  // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
+  // `Current time: ...` line on every call even with an empty queue, and
+  // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  async function readVolatile() {
     const [nudges, mail] = await Promise.all([
       runWithWarning(directory, "nudge", "drain", "--inject"),
       runWithWarning(directory, "mail", "check", "--inject"),
     ]);
-    return [prime, nudges, mail].filter(Boolean).join("\n\n");
+    return [nudges, mail].filter(Boolean).join("\n\n");
+  }
+
+  // readTurnVolatile runs the consumptive commands once per turn.
+  async function readTurnVolatile() {
+    if (!currentTurnID) {
+      return readVolatile();
+    }
+    if (drainedTurnID !== currentTurnID) {
+      // Claim the turn before awaiting so concurrent generations of the same
+      // turn share this pending drain instead of each reaching gc.
+      drainedTurnID = currentTurnID;
+      turnVolatile = readVolatile();
+    }
+    return turnVolatile;
+  }
+
+  // prependStableSystem keeps the cached prime at the head of system[0] so the
+  // role opens the prompt and the bytes before OpenCode's own system text are
+  // identical from one generation to the next.
+  function prependStableSystem(system, prime) {
+    if (!prime) {
+      return;
+    }
+    if (system[0]) {
+      system[0] = prependText(system[0], prime);
+    } else {
+      system.unshift(prime);
+    }
+  }
+
+  // appendVolatileSystem places the per-turn text after every stable entry.
+  // OpenCode folds system[1..] into one message only while system[0] is still
+  // its own header, so after prependStableSystem ran this entry stays a
+  // separate trailing system message; the prompt-cache prefix ends at the
+  // stable text instead of at the prime.
+  function appendVolatileSystem(system, volatile) {
+    if (volatile) {
+      system.push(volatile);
+    }
   }
 
   return {
@@ -263,15 +304,15 @@ export default async function gascityPlugin({ directory, client }) {
       }
     },
 
+    // No chat.message injection: OpenCode persists output.message.system on
+    // the user message and joins it into the tail of system[0] on every
+    // generation of that turn, so anything written there re-enters the
+    // stable header and undoes the split below.
     "experimental.chat.system.transform": async (_input, output) => {
-      const prefix = await buildPrefix();
-      if (prefix) {
-        if (output.system[0]) {
-          output.system[0] = prependText(output.system[0], prefix);
-        } else {
-          output.system.unshift(prefix);
-        }
-      }
+      const prime = await readPrime();
+      const volatile = await readTurnVolatile();
+      prependStableSystem(output.system, prime);
+      appendVolatileSystem(output.system, volatile);
     },
 
     "experimental.session.compacting": async (_input, output) => {
