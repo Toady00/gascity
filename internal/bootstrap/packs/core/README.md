@@ -52,7 +52,7 @@ controller's bounded idle-claim backstop. A target with no members is nudged
 directly, preserving named-session and explicit-slot routing.
 
 The script atomically records an event cursor, pending deliveries, retry times,
-and the last successfully notified route in
+the last observed route, and the last successfully notified route in
 `$GC_PACK_STATE_DIR/nudge-on-route-delivery.json`. A complete event read advances
 the cursor together with pending work, before delivery. Failed reads retain the
 cursor; failed sends stay pending without requiring another event. Retry delays
@@ -67,6 +67,9 @@ Repeated observations of the same route do not resend. A claim/release or a
 change to another route makes the work eligible again. A process crash after
 nudge acceptance but before saving success can cause a duplicate; this is
 at-least-once delivery, not an exactly-once promise.
+Event observations can lag the live ledger read used for delivery. Repeated
+stale observations do not repeat a newer live-route notification. An away/back
+reroute wholly inside that lag can coalesce with the already accepted notification.
 
 First installation, a reset event log, and gaps over 2,000 events recover from
 `gc ready --status=open`, which federates HQ, rigs, relocated graph stores, and

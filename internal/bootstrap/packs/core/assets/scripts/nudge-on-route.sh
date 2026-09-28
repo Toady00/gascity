@@ -30,13 +30,14 @@ if [ "$MODE" = exec ]; then
     fi
 fi
 
-STATE='{"version":1,"cursor":0,"pending":{},"notified":{},"retry":{}}'
+STATE='{"version":1,"cursor":0,"pending":{},"notified":{},"retry":{},"observed":{}}'
 if [ -f "$STATE_FILE" ]; then
     STATE="$(cat "$STATE_FILE")"
     if ! printf '%s\n' "$STATE" | jq -e '
         .version == 1 and (.cursor | type == "number" and . >= 0)
         and (.pending | type == "object") and (.notified | type == "object")
-        and (.retry | type == "object")' >/dev/null; then
+        and (.retry | type == "object")
+        and ((.observed // {}) | type == "object")' >/dev/null; then
         [ "$MODE" != --check ] || exit 0
         echo "nudge-on-route: invalid delivery state: $STATE_FILE" >&2
         exit 1
@@ -103,7 +104,8 @@ scan_routes() {
         (.[1] | map(.id)) as $ids | .[0] | .cursor = $head |
         .notified |= with_entries(select(.key as $id | $ids | index($id))) |
         .pending |= with_entries(select(.key as $id | $ids | index($id))) |
-        .retry |= with_entries(select(.key as $id | $ids | index($id)))')"
+        .retry |= with_entries(select(.key as $id | $ids | index($id))) |
+        .observed = ((.observed // {}) | with_entries(select(.key as $id | $ids | index($id))))')"
 }
 
 if [ "$MODE" = --check ]; then
@@ -137,6 +139,9 @@ elif [ "$HEAD_SEQ" -gt "$LAST_SEQ" ]; then
     fi
 fi
 
+# Event observations can lag the live route used for delivery. Track them
+# separately: an observed transition invalidates an old success, but repeated
+# stale snapshots must not erase a newer live-route notification.
 if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
     .[0] as $state | .[1:] | sort_by(.seq) | reduce .[] as $e ($state;
         .cursor = ([.cursor, $e.seq] | max)
@@ -147,11 +152,16 @@ if ! NEXT="$(printf '%s\n%s\n' "$STATE" "$EVENTS" | jq -s '
             | if ($id | type) != "string" or $id == "" then .
               elif $e.type == "bead.closed" or $e.type == "bead.deleted" or $b.status != "open"
                    or ($b.assignee // "") != "" or $route == "" then
-                  del(.pending[$id], .notified[$id], .retry[$id])
-              elif .notified[$id] != $route then
-                  (if .pending[$id] != $route or .retry[$id].reason == "blocked" then del(.retry[$id]) else . end)
-                  | .pending[$id] = $route
-              else . end
+                  del(.pending[$id], .notified[$id], .retry[$id], .observed[$id])
+              else
+                  (if .observed[$id] != $route and .notified[$id] != $route
+                   then del(.notified[$id]) else . end)
+                  | .observed[$id] = $route
+                  | if .notified[$id] != $route then
+                      (if .pending[$id] != $route or .retry[$id].reason == "blocked" then del(.retry[$id]) else . end)
+                      | .pending[$id] = $route
+                    else del(.pending[$id], .retry[$id]) end
+              end
           else . end)
 ')"; then read_failed; fi
 
@@ -217,15 +227,23 @@ while IFS= read -r id; do
     route="$(printf '%s\n' "$READY" | jq -r --arg id "$id" \
         'first(.[] | select(.id == $id and .status == "open" and (.assignee // "") == "") | .metadata."gc.routed_to") // ""')"
     if [ -z "$route" ]; then
-        if printf '%s\n' "$OPEN" | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null; then
+        open_route="$(printf '%s\n' "$OPEN" | jq -r --arg id "$id" \
+            'first(.[] | select(.id == $id) | .metadata."gc.routed_to") // ""')"
+        if [ -n "$open_route" ]; then
+            STATE="$(printf '%s\n' "$STATE" | jq --arg id "$id" --arg route "$open_route" \
+                'if .notified[$id] != $route then del(.notified[$id]) else . end')"
             defer_delivery "$id" blocked
             continue
         fi
-        STATE="$(printf '%s\n' "$STATE" | jq --arg id "$id" 'del(.pending[$id], .retry[$id], .notified[$id])')"
+        STATE="$(printf '%s\n' "$STATE" | jq --arg id "$id" 'del(.pending[$id], .retry[$id], .notified[$id], .observed[$id])')"
     else
         # Each routing gets its own notification. Marking several beads done
         # after one claim turn could leave the unclaimed siblings invisible.
         if ! printf '%s\n' "$STATE" | jq -e --arg id "$id" --arg route "$route" '.notified[$id] == $route' >/dev/null; then
+            # A live reroute invalidates the old success before the new attempt.
+            # A -> failed B -> A must notify A again, including after a crash.
+            STATE="$(printf '%s\n' "$STATE" | jq --arg id "$id" 'del(.notified[$id])')"
+            save_state
             if ! nudge_routed_target "$route"; then
                 echo "nudge-on-route: failed notifying $route for $id; will retry" >&2
                 FAILED=1

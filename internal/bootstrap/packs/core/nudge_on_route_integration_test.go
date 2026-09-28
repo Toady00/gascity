@@ -366,6 +366,90 @@ func TestRouteNotificationDelayedReplayAndRouteChanges(t *testing.T) {
 	}
 }
 
+func TestRouteNotificationReturningRouteAfterFailedReroute(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	other := `{"id":"test-work","status":"open","metadata":{"gc.routed_to":"other"}}`
+	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work", Payload: json.RawMessage(other)})
+	f.syncEvents()
+	f.write("beads", "["+other+"]", 0o600)
+	f.write("fail-nudge", "", 0o600)
+	if err := f.run(); err == nil {
+		t.Fatal("rerouted delivery unexpectedly succeeded")
+	}
+	if err := os.Remove(filepath.Join(f.dir, "fail-nudge")); err != nil {
+		t.Fatal(err)
+	}
+	f.seed("bead.updated", true)
+	if !f.due() {
+		t.Fatal("returning route retained the first route's obsolete success")
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\nworker\n" {
+		t.Fatalf("returning route notifications = %q", got)
+	}
+}
+
+func TestRouteNotificationReturningRouteBeforeDelivery(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one replay batch", true: "blocked intermediate route"}[blocked], func(t *testing.T) {
+			f := newRouteScriptFixture(t)
+			f.seed("bead.created", true)
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			other := `{"id":"test-work","status":"open","metadata":{"gc.routed_to":"other"}}`
+			f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work", Payload: json.RawMessage(other)})
+			f.syncEvents()
+			if blocked {
+				f.write("beads", "["+other+"]", 0o600)
+				f.write("blocked", "", 0o600)
+				if err := f.run(); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(f.dir, "blocked")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.seed("bead.updated", true)
+			if !f.due() {
+				t.Fatal("returning route was suppressed before intermediate delivery")
+			}
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.nudges(); got != "worker\nworker\n" {
+				t.Fatalf("returning-route notifications = %q", got)
+			}
+		})
+	}
+}
+
+func TestRouteNotificationRepeatedStaleRouteDoesNotRepeatLiveDelivery(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	stale := json.RawMessage(`{"id":"test-work","status":"open","metadata":{"gc.routed_to":"stale"}}`)
+	f.write("beads", `[{"id":"test-work","status":"open","metadata":{"gc.routed_to":"current"}}]`, 0o600)
+	for i := 0; i < 2; i++ {
+		f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work", Payload: stale})
+		f.syncEvents()
+		if err := f.run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.nudges(); got != "worker\ncurrent\n" {
+		t.Fatalf("stale replay repeated a live-route delivery: %q", got)
+	}
+}
+
 func TestRouteNotificationUnrelatedEventsDoNotSelfTrigger(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.created", true)
@@ -519,12 +603,16 @@ func TestRouteNotificationNamedTemplateMember(t *testing.T) {
 func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.created", true)
-	f.write("sessions", `{"sessions":[{"name":"worker-1"},{"name":"worker-2"}]}`, 0600)
+	f.write("sessions", `{"sessions":[{"name":"worker-1"},{"name":"worker-2"}]}`, 0o600)
 	if err := f.run(); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.nudges(); got != "" {
 		t.Fatalf("multi-member pool received broadcast nudges: %q", got)
+	}
+	f.expireRetry()
+	if f.due() {
+		t.Fatal("work handed to the pool backstop remained pending for notification")
 	}
 }
 
