@@ -203,8 +203,9 @@ esac
 // workflow anchor on the GATED path so a named holder's launch anchor is not
 // dropped when it is not probing self-routed demand.
 func TestNamedSessionOriginGatesAdmitOnlySelfTarget(t *testing.T) {
-	plain := poolDemandOriginGateScript()
-	anchor := poolDemandOriginGateScriptWithGraphAnchorFallback()
+	a := &Agent{Name: "worker"}
+	plain := poolDemandOriginGateScript(a)
+	anchor := poolDemandOriginGateScriptWithGraphAnchorFallback(a)
 	const admit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
 	const unchangedArm = `case "$GC_SESSION_ORIGIN" in ephemeral|"") ;; `
 
