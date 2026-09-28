@@ -123,10 +123,12 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   658,
-			BaselineFiles:   189,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// The route-notification integration fixture owns one shell subprocess
+			// site; it stays tagged and does not enlarge untagged/Small debt.
+			BaselineCalls:   659,
+			BaselineFiles:   190,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
