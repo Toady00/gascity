@@ -166,20 +166,31 @@ STATE="$(printf '%s\n' "$NEXT" | jq 'del(.read_after, .read_failures)')"
 # Persist pending work WITH the cursor, before attempting delivery.
 save_state
 
-# This adapter is independent of replay/retry state so pool policy composes here.
+# Nudge the session named by a routed_to target. A multi-session pool
+# routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
+# which is the members' `template`, not a session name — `gc session nudge`
+# resolves a single session and cannot target a pool base. Detect that shape,
+# but do not fan out: the controller binds routed pool demand to one eligible
+# slot, and the native idle-claim backstop delivers a bounded nudge if that
+# slot does not claim normally. Nudging every active member also wakes busy
+# siblings that cannot claim the new work. A template with exactly one active
+# member is safe to nudge once; a target with no members (a named session or
+# explicit slot) is nudged directly.
 nudge_routed_target() {
     _target="$1"
-    _members="$(gc session list --json --state active --template "$_target" \
-        | jq -r '(.sessions // [])[] | .name // .id')" || return 1
-    if [ -n "$_members" ]; then
-        _any=1
-        while IFS= read -r _m; do
-            [ -n "$_m" ] || continue
-            if gc session nudge "$_m" "$NUDGE_MESSAGE"; then _any=0; fi
-        done <<MEMBERS
-$_members
-MEMBERS
-        return "$_any"
+    _sessions="$(gc session list --json --state active --template "$_target" 2>/dev/null)" \
+        || _sessions='{"sessions":[]}'
+    _member_count="$(printf '%s\n' "$_sessions" \
+        | jq -r '(.sessions // []) | length' 2>/dev/null)" || _member_count=0
+    if [ "$_member_count" -gt 1 ]; then
+        return 0
+    fi
+    if [ "$_member_count" -eq 1 ]; then
+        _members="$(printf '%s\n' "$_sessions" \
+            | jq -r '(.sessions // [])[0] | .name // .id' 2>/dev/null)" || _members=""
+        [ -n "$_members" ] || return 0
+        gc session nudge "$_members" "$NUDGE_MESSAGE" >/dev/null 2>&1
+        return $?
     fi
     gc session nudge "$_target" "$NUDGE_MESSAGE"
 }

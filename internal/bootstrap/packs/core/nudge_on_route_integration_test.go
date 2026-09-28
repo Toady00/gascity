@@ -516,6 +516,18 @@ func TestRouteNotificationNamedTemplateMember(t *testing.T) {
 	}
 }
 
+func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	f.write("sessions", `{"sessions":[{"name":"worker-1"},{"name":"worker-2"}]}`, 0600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("multi-member pool received broadcast nudges: %q", got)
+	}
+}
+
 func TestRouteNotificationImportsLegacySuccesses(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.created", true)

@@ -46,11 +46,10 @@ ready query. Claimed or closed work is discarded; blocked work stays pending.
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
 pool-routed bead's `routed_to` is the members' `template`, not a name
 `gc session nudge` can resolve. The script handles both: it enumerates the
-pool's active members via `gc session list --template <routed_to>` and nudges
-each, falling back to a direct `gc session nudge <routed_to>` when the target
-has no members (a single-session agent or an explicit slot). Without this,
-nudges to a pool base silently no-op — defeating the warm-idle pool wake this
-order exists to provide.
+pool's active members via `gc session list --template <routed_to>`. A template
+with one active member receives one nudge; a multi-member pool is left to the
+controller's bounded idle-claim backstop. A target with no members is nudged
+directly, preserving named-session and explicit-slot routing.
 
 The script atomically records an event cursor, pending deliveries, retry times,
 and the last successfully notified route in
