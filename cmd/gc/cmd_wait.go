@@ -177,7 +177,13 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wait [session-id-or-alias]",
 		Short: "Register a dependency wait for a session",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Register a durable wait so a session is woken when the beads it depends on close.
+
+With --sleep the session takes a wait hold and drains to sleep. The hold is
+durable: a wait-held session that still owns assigned work stays asleep rather
+than being restarted to serve it, and its pool slot and claim are left alone. It
+comes back when the wait resolves, or on ` + "`gc session wake`" + `.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionWait(args, depIDs, matchAny, note, sleep, stdout, stderr) != 0 {
 				return errExit
@@ -402,10 +408,17 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 		return 0
 	}
 	if sleep {
-		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
-			"wait_hold":    "true",
-			"sleep_intent": "wait-hold",
-		}); err != nil {
+		// The hold patch depends on whether a suspend already stands, so an
+		// unreadable session fails the command before any hold is written: a
+		// blind wait-hold write could overwrite a standing suspend's intent.
+		// As with a failed hold write below, the registered wait is left in
+		// place.
+		current, err := deps.sessions.Get(sessionID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session wait: reading session for wait hold: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if err := deps.sessions.ApplyPatch(sessionID, sessionpkg.WaitSleepHoldPatch(current, now)); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -843,7 +856,7 @@ func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (wait
 				return result, 1
 			}
 		}
-		if err := clearSessionWaitHoldIfIdle(sessFront, w.SessionID); err != nil {
+		if err := clearSessionWaitHoldIfIdle(sessFront, w.SessionID, now); err != nil {
 			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
 			return result, 1
 		}
@@ -1155,7 +1168,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
 				return nil, err
 			}
-			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, now); err != nil {
 				return nil, err
 			}
 			continue
@@ -1174,7 +1187,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				if err := sessFront.ExpireWait(wait.ID, now); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, now); err != nil {
 					return nil, err
 				}
 				continue
@@ -1188,7 +1201,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				return nil, err
 			}
 			if done {
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, now); err != nil {
 					return nil, err
 				}
 				continue
@@ -1215,7 +1228,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID, now); err != nil {
 					return nil, err
 				}
 				continue
@@ -1405,23 +1418,24 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	return err
 }
 
-func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
+// clearSessionWaitHold releases the session's wait park. The release is the
+// session package's (ReleaseWaitHoldPatch): wait_hold is cleared and any park
+// that still stands — a suspend whose held_until is in the future — stays
+// named in sleep_intent and sleep_reason. The patch depends on that surviving
+// park, so an unreadable session is an error and nothing is written: a blind
+// clear could erase a standing suspend's intent.
+func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string, now time.Time) error {
 	if sessionID == "" {
 		return nil
 	}
-	batch := map[string]string{
-		"wait_hold":    "",
-		"sleep_intent": "",
+	info, err := sessFront.Get(sessionID)
+	if err != nil {
+		return fmt.Errorf("reading session %s to release its wait hold: %w", sessionID, err)
 	}
-	if sessFront != nil {
-		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
-			batch["sleep_reason"] = ""
-		}
-	}
-	return sessFront.ApplyPatch(sessionID, batch)
+	return sessFront.ApplyPatch(sessionID, sessionpkg.ReleaseWaitHoldPatch(info, now))
 }
 
-func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) error {
+func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string, now time.Time) error {
 	hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
 	if err != nil {
 		return err
@@ -1429,7 +1443,7 @@ func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) e
 	if hasWaits {
 		return nil
 	}
-	return clearSessionWaitHold(sessFront, sessionID)
+	return clearSessionWaitHold(sessFront, sessionID, now)
 }
 
 func hasNonTerminalWaits(sessFront *sessionpkg.Store, sessionID string) (bool, error) {

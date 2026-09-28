@@ -766,6 +766,7 @@ Restart and patrol recovery use one authoritative outcome table:
 | stopped | any | `idle-stop-confirmed` | no | commit or preserve `asleep: idle` |
 | stopped | any | `idle-stop-pending` | no | clear `idle-stop-pending`, emit recovery-ambiguous event, then rerun ordinary wake and idle-eligibility evaluation before any suppression is re-latched |
 | stopped | any | any | yes | clear idle markers and wake now |
+| stopped | asleep / `user-hold` or `wait-hold` | `user-hold` or `wait-hold` | any | stay parked: a standing hold survives the drain that enacted it and is released by `gc session wake`, by the wait resolving, or by `held_until` expiring — never by the drain (gastownhall/gascity#5561) |
 | any | any | any | structural action wins | ignore idle path and apply structural action |
 
 The missing-session classifier is therefore constrained:
@@ -845,8 +846,11 @@ Definitions:
   idle-sleep attempt
 - `config_wake_suppressed`: whether config wake is currently latched off
   due to idle sleep
-- `sleep_intent`: durable stop-path marker (`idle-stop-pending`,
-  `idle-stop-confirmed`, or empty)
+- `sleep_intent`: durable stop marker. Two kinds: a transient stop-path
+  marker (`idle-stop-pending`, `idle-stop-confirmed`) that ends with the
+  drain, and a STANDING hold (`user-hold` from `gc session suspend`,
+  `wait-hold` from `gc session wait --sleep`) that outlives it. Empty when
+  neither applies.
 - `attach_intent`: durable operator attach/wake request with expiry,
   cleared when attach starts, fails definitively, or expires
 - `sleep_decision_snapshot`: canonical struct recorded in metadata and
@@ -870,7 +874,28 @@ Definitions:
 Authoritative precedence:
 
 1. `state` and `sleep_reason` define the public lifecycle state
-2. `sleep_intent` only describes an in-flight or recovered stop path
+2. a transient `sleep_intent` only describes an in-flight or recovered stop
+   path; a standing hold intent additionally records that an operator or a
+   wait gate parked the session, and is carried into `sleep_reason` at drain
+   completion so pool-slot and crash-recovery readers see the park. The two
+   parks are independent and each is read from its own live marker: a wait
+   park is a non-empty `wait_hold`; a suspend is `user-hold` vocabulary (in
+   `sleep_intent` or the recorded `sleep_reason`) paired with a future
+   `held_until` — `held_until` alone is a heartbeat keep-alive. When both
+   stand the suspend is the one named in the markers, and releasing either
+   park (the hold expiring, the wait resolving, failing, expiring or being
+   canceled) hands the markers to the park that still stands instead of
+   blanking them; registering a sleeping wait never overwrites a standing
+   suspend's intent. Both drain completion writers read this evidence when
+   they run rather than the reason the drain began with: a park that lands
+   during an in-flight idle drain completes as the park; a hold that expired
+   before the writer runs completes as the surviving park, or as an ordinary
+   `idle` sleep when none survives; and a parked pool seat keeps its bead even
+   when no claim is visible to the drain-ack close gate. A writer is not
+   always reached: when a hold expires while the runtime is still alive and
+   the seat has wake demand (e.g. a ready claim), the timer heal releases the
+   hold first and the wake demand cancels the cancelable `user-hold` drain,
+   so the seat keeps running and no completion is recorded
 3. `config_wake_suppressed` is derived from lifecycle state plus
    suppression rules; it is not an independent lifecycle state
 4. blocker and snapshot fields are diagnostic, not state-machine inputs
