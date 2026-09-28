@@ -353,7 +353,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") {
+		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		// Optional injection must run concurrently (#5553).
+		!strings.Contains(content, "Promise.all([") {
 		return true
 	}
 	for _, marker := range []string{
