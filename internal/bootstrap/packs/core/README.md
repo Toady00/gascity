@@ -60,6 +60,19 @@ grow from one minute to a maximum of one hour. Blocked work is rechecked after
 one minute, or sooner when its bead changes. This includes held and deferred
 work. Successful requests to the nudge CLI include requests accepted
 by its durable queue; the supervisor owns subsequent runtime delivery.
+ACP cities need the supervisor delivery owner enabled in `city.toml`:
+
+```toml
+[daemon]
+nudge_dispatcher = "supervisor"
+```
+
+Restart the supervisor after changing this setting. The default legacy mode
+does not start an ACP nudge poller, and a CLI subprocess cannot own the
+supervisor's ACP connection. A queued nudge alone therefore cannot wake an idle
+ACP session in that mode. The remaining default-mode gap is tracked in
+[issue #6080](https://github.com/gastownhall/gascity/issues/6080).
+
 Each run processes at most 20 due beads and leaves the remainder pending. Each
 eligible routing receives its own notification, even when targets are shared.
 
