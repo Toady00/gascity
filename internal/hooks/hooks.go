@@ -466,7 +466,12 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime, or the prompt-cache prefix ends at the
 		// prime on every turn (#5732).
-		!hookContains(content, "appendVolatileSystem") {
+		!hookContains(content, "appendVolatileSystem") ||
+		// Consumptive queue draining must be scoped to a turn (#5552) and,
+		// because OpenCode instantiates one plugin per directory, the turn
+		// state must be keyed by session so a subagent's user message does
+		// not reopen the parent's turn.
+		!hookContains(content, "const turns = new Map()") {
 		return true
 	}
 	for _, marker := range []string{
@@ -508,7 +513,10 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime (#5732). A version-only check would keep
 		// a same-numbered plugin with a different body.
-		!hookContains(content, "appendVolatileSystem")
+		!hookContains(content, "appendVolatileSystem") ||
+		// Turn state must be keyed by session; the plugin instance is shared
+		// by every session in the directory (same shape as OpenCode).
+		!hookContains(content, "const turns = new Map()")
 }
 
 func mimocodeHookVersion(content string) int {
