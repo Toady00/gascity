@@ -1858,6 +1858,9 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		`run(directory, "handoff", "context cycle")`,
 		`"session", "reset"`,
 		`"session.deleted"`,
+		// chat.message is awaited before OpenCode persists the user message,
+		// so injecting from it delays the send acknowledgement (#5551).
+		`"chat.message"`,
 	} {
 		if strings.Contains(opencodeHooks, unwanted) {
 			t.Errorf("OpenCode plugin contains obsolete marker %q:\n%s", unwanted, opencodeHooks)
@@ -2301,6 +2304,7 @@ pending.child.stdin?.end();
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
+	withChatMessage := append(append([]byte{}, current...), []byte("\"chat.message\";\n")...)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2316,6 +2320,9 @@ pending.child.stdin?.end();
 	}
 	if !opencodeHookNeedsUpgrade(openStdin) {
 		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(withChatMessage) {
+		t.Fatal("OpenCode hook still registering chat.message did not request upgrade")
 	}
 }
 
