@@ -63,7 +63,7 @@ test("OpenCode factory is silent without identity and registers managed hooks", 
 //
 // Run directly with `node --test internal/hooks/opencode_plugin.test.mjs`;
 // TestProviderPluginNodeSuite (plugin_node_test.go) runs the same file under
-// `go test ./internal/hooks` whenever node is on PATH.
+// `go test -tags integration ./internal/hooks` whenever node is on PATH.
 //
 // The plugins resolve gc through GC_BIN at module load, so each suite points
 // GC_BIN at a fake gc script before importing the plugin. The fake answers
