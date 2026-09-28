@@ -80,10 +80,18 @@ func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string)
 	}
 }
 
-// TestNudgeOnRouteOrder pins the nudge-on-route order's event contract: it wakes
-// on bead.updated and runs the nudge-on-route script.
+// The condition order must have a single city-scoped writer for its outbox.
 func TestNudgeOnRouteOrder(t *testing.T) {
-	assertEventExecOrder(t, "nudge-on-route.toml", "bead.updated", "nudge-on-route.sh")
+	o := readOrder(t, "nudge-on-route.toml")
+	if err := orders.Validate(o); err != nil {
+		t.Fatal(err)
+	}
+	if o.Trigger != "condition" || o.Check == "" || !o.IsExec() || !o.IsCityScoped() {
+		t.Fatalf("route notifications require a city-scoped condition exec: %+v", o)
+	}
+	if o.NoWorkGate || o.Idempotent {
+		t.Fatal("route notifications require the fail-closed single-flight gate")
+	}
 }
 
 // TestCascadeNudgeOnBlockerCloseOrder pins the cascade-nudge order's event
