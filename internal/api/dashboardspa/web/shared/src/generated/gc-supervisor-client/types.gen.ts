@@ -62,6 +62,8 @@ export type AgentPatch = {
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
+    AutoReclaimStaleClaims: boolean | null;
+    ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
@@ -463,6 +465,7 @@ export type BeadsDiagnostic = {
     native_store_eligible: boolean;
     preflight_gate?: string;
     preflight_reason?: string;
+    proxied?: ProxiedDiagnostic;
 };
 
 /**
@@ -645,6 +648,26 @@ export type ConfigValidateOutputBody = {
     warnings: Array<string> | null;
 };
 
+export type ContextAdvisory = {
+    Enabled: boolean | null;
+    Tiers: Array<ContextAdvisoryTier> | null;
+    WindowTokens: number | null;
+};
+
+export type ContextAdvisoryTier = {
+    Enabled: boolean | null;
+    Message: string | null;
+    Threshold: number | null;
+};
+
+export type ControlDispatcherScopeGapPayload = {
+    rig_context?: string;
+    sample_bead_id?: string;
+    scope_label: string;
+    store_ref?: string;
+    suppressed_count: number;
+};
+
 export type ControlRootSettleFailedPayload = {
     error: string;
     error_class: string;
@@ -799,6 +822,11 @@ export type ConvoyRemoveInputBody = {
     items?: Array<string> | null;
 };
 
+export type Cursors = {
+    ignored: number;
+    main: number;
+};
+
 export type DeliveryContextRecord = {
     BindingGeneration: number;
     Conversation: ConversationRef;
@@ -891,7 +919,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1415,6 +1443,12 @@ export type HeartbeatEvent = {
      * ISO 8601 timestamp when the heartbeat was sent.
      */
     timestamp: string;
+};
+
+export type HookClaimReclaimedStalePayload = {
+    bead_id: string;
+    new_assignee: string;
+    previous_owner: string;
 };
 
 export type InboundEventPayload = {
@@ -2579,6 +2613,22 @@ export type ProviderUpdateInputBody = {
     ready_delay_ms?: number;
 };
 
+export type ProxiedDiagnostic = {
+    cursors: Cursors;
+    demoted?: boolean;
+    detail?: string;
+    endpoint: ProxiedEndpointStamp;
+    evidence?: string;
+    idle_policy?: string;
+    verdict?: string;
+};
+
+export type ProxiedEndpointStamp = {
+    generation?: string;
+    pid?: number;
+    port?: number;
+};
+
 export type PublishReceipt = {
     Conversation: ConversationRef;
     Delivered: boolean;
@@ -3235,6 +3285,29 @@ export type SessionPermissionModeBody = {
      * Provider schema value for the permission_mode option.
      */
     permission_mode: string;
+};
+
+export type SessionPoolSlotRetiredAtDrainDeadlinePayload = {
+    /**
+     * Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline.
+     */
+    drain_age_seconds: number;
+    /**
+     * RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs.
+     */
+    drain_at?: string;
+    /**
+     * Canonical session bead ID for the retired pool seat.
+     */
+    session_id: string;
+    /**
+     * Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it.
+     */
+    session_name?: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
 };
 
 /**
@@ -4933,7 +5006,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Retained bead row count used as the denominator, including open and closed beads.
+     * Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.
      */
     live_rows: number;
     /**
@@ -4941,9 +5014,13 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per retained row, including open and closed beads.
+     * Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.
      */
     ratio_mb_per_row: number;
+    /**
+     * True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.
+     */
+    rows_measured: boolean;
     /**
      * Total bytes of the store directory.
      */
@@ -4953,7 +5030,7 @@ export type StatusStoreHealth = {
      */
     threshold_mb_per_row: number;
     /**
-     * True when maintenance is overdue.
+     * True when maintenance is overdue. Meaningless unless rows_measured is true.
      */
     warning: boolean;
 };
@@ -5242,6 +5319,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.dispatcher_scope_gap';
+} & TypedEventStreamEnvelopeControlDispatcherScopeGap) | ({
     type: 'control.root_settle_failed';
 } & TypedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
@@ -5298,6 +5377,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
 } & TypedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
+    type: 'hook.claim.reclaimed_stale';
+} & TypedEventStreamEnvelopeHookClaimReclaimedStale) | ({
     type: 'mail.archived';
 } & TypedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -5352,12 +5433,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.drain_fence_unavailable';
 } & TypedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
+    type: 'session.drain_stop_escalated';
+} & TypedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pool_slot_retired_at_drain_deadline';
+} & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -5674,6 +5759,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope control.dispatcher_scope_gap
+ */
+export type TypedEventStreamEnvelopeControlDispatcherScopeGap = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlDispatcherScopeGapPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.dispatcher_scope_gap';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6200,6 +6303,24 @@ export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
 };
 
 /**
+ * TypedEventStreamEnvelope hook.claim.reclaimed_stale
+ */
+export type TypedEventStreamEnvelopeHookClaimReclaimedStale = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: HookClaimReclaimedStalePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'hook.claim.reclaimed_stale';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope mail.archived
  */
 export type TypedEventStreamEnvelopeMailArchived = {
@@ -6686,6 +6807,24 @@ export type TypedEventStreamEnvelopeSessionDrainFenceUnavailable = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.drain_stop_escalated
+ */
+export type TypedEventStreamEnvelopeSessionDrainStopEscalated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_stop_escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
@@ -6736,6 +6875,24 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
+ */
+export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPoolSlotRetiredAtDrainDeadlinePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_slot_retired_at_drain_deadline';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7189,6 +7346,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.dispatcher_scope_gap';
+} & TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) | ({
     type: 'control.root_settle_failed';
 } & TypedTaggedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
@@ -7245,6 +7404,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
+    type: 'hook.claim.reclaimed_stale';
+} & TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale) | ({
     type: 'mail.archived';
 } & TypedTaggedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -7299,12 +7460,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.drain_fence_unavailable';
 } & TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
+    type: 'session.drain_stop_escalated';
+} & TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pool_slot_retired_at_drain_deadline';
+} & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -7636,6 +7801,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope control.dispatcher_scope_gap
+ */
+export type TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlDispatcherScopeGapPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.dispatcher_scope_gap';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8191,6 +8375,25 @@ export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope hook.claim.reclaimed_stale
+ */
+export type TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: HookClaimReclaimedStalePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'hook.claim.reclaimed_stale';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope mail.archived
  */
 export type TypedTaggedEventStreamEnvelopeMailArchived = {
@@ -8704,6 +8907,25 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.drain_stop_escalated
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_stop_escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.draining
  */
 export type TypedTaggedEventStreamEnvelopeSessionDraining = {
@@ -8757,6 +8979,25 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPoolSlotRetiredAtDrainDeadlinePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pool_slot_retired_at_drain_deadline';
     workflow?: WorkflowEventProjection;
 };
 
@@ -17452,6 +17693,10 @@ export type SendSessionMessageData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -17706,6 +17951,10 @@ export type RespondSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -17991,6 +18240,10 @@ export type SubmitSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

@@ -109,6 +109,9 @@ type AwakeDecision struct {
 	// use it to persist currently_processing_bead_id and to detect when an
 	// alive session has been reassigned to a different bead.
 	AssignedWorkBeadID string
+	// AssignedWorkClaimed distinguishes an in-progress claim from ready open
+	// work. Destructive idle recovery must never recycle a live claim holder.
+	AssignedWorkClaimed bool
 	// RequiresFreshCycle is true when an alive session's recorded
 	// currently_processing_bead_id differs from AssignedWorkBeadID. The
 	// reconciler combines this with wake_mode=fresh to trigger a
@@ -414,6 +417,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 		if hasAssignedWork {
 			decision.AssignedWorkBeadID = anchor
+			for _, work := range input.WorkBeads {
+				if work.Status != "in_progress" {
+					continue
+				}
+				if sessionAssigneeMatches(input.NamedSessions, bead, strings.TrimSpace(work.Assignee)) {
+					decision.AssignedWorkClaimed = true
+					break
+				}
+			}
 			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
 				decision.RequiresFreshCycle = true
 			}
@@ -492,6 +504,12 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
+		//
+		// A durable explicit wake request ("explicit-wake") is exempt for the
+		// same reason: it is a standing operator/wake-path demand for this
+		// specific session, so an idle window that predates it (e.g. from a
+		// supervisor-restart re-projection) must not silently cancel it. See
+		// #5739.
 		agent, hasAgent := lookupAgent(bead.Template)
 		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
@@ -499,7 +517,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
-			desired[name] != "work-query" &&
+			desired[name] != "work-query" && desired[name] != "explicit-wake" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			var idleTimeout time.Duration
 			switch {

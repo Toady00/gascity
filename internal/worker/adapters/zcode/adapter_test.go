@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -58,8 +58,12 @@ if os.environ.get("STUB_IGNORE_INT"):
 
 sleep_for = float(os.environ.get("STUB_SLEEP", "0"))
 if sleep_for:
+    # STUB_RELEASE_FILE ends the sleep as soon as it exists: STUB_SLEEP is then
+    # only a ceiling, and a test holds the turn open exactly as long as it needs
+    # to observe something.
+    release = os.environ.get("STUB_RELEASE_FILE")
     deadline = time.time() + sleep_for
-    while time.time() < deadline:
+    while time.time() < deadline and not (release and os.path.exists(release)):
         time.sleep(0.1)
     done = os.environ.get("STUB_DONE_FILE")
     if done:
@@ -87,6 +91,42 @@ print(json.dumps({
     "usage": {"inputTokens": 11, "outputTokens": 3, "totalTokens": 14},
     "projection": {"turnCount": 1, "totalTokenCount": 14},
 }))
+`
+
+// ptyDriver runs its arguments behind a pseudo-terminal, standing in for a
+// tmux pane: our stdin is relayed into the pty and everything the child writes
+// comes back out on our stdout, escape sequences and all. TERM is forwarded to
+// the child, so the harness's signal path ends a session the way it does off a
+// tty; a child that exits ends the relay, and its status becomes ours.
+const ptyDriver = `#!/usr/bin/env python3
+import os, pty, select, signal, sys
+
+child, master = pty.fork()
+if child == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+
+signal.signal(signal.SIGTERM, lambda *_: os.kill(child, signal.SIGTERM))
+
+fds = [master, 0]
+while True:
+    ready, _, _ = select.select(fds, [], [])
+    if master in ready:
+        try:
+            data = os.read(master, 65536)
+        except OSError:  # EIO: the child closed its side
+            data = b""
+        if not data:
+            break
+        os.write(1, data)
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if data:
+            os.write(master, data)
+        else:
+            fds.remove(0)
+
+_, status = os.waitpid(child, 0)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 `
 
 // installedAdapter materializes the adapter once per test binary. Installing
@@ -122,6 +162,10 @@ type harness struct {
 	ctlPath   string
 	mirrorDir string
 	workDir   string
+	// ptyDriver wraps the adapter in a pseudo-terminal when tty is set, so it
+	// takes the branches it takes in a tmux pane.
+	ptyDriver string
+	tty       bool
 	env       map[string]string
 	// stderr holds the last run's stderr. The adapter's die_config sites all
 	// exit 78 and only stderr says which precondition tripped (ga-xx7x9).
@@ -151,6 +195,10 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 	if err := os.WriteFile(bundle, []byte("// stub bundle\n"), 0o644); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
+	driver := filepath.Join(root, "pty-driver")
+	if err := os.WriteFile(driver, []byte(ptyDriver), 0o755); err != nil {
+		t.Fatalf("write pty driver: %v", err)
+	}
 
 	h := &harness{
 		t:         t,
@@ -160,6 +208,7 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 		ctlPath:   filepath.Join(root, "stub.ctl"),
 		mirrorDir: mirrorDir,
 		workDir:   workDir,
+		ptyDriver: driver,
 		env: map[string]string{
 			"HOME":                    home,
 			"XDG_STATE_HOME":          filepath.Join(home, ".local", "state"),
@@ -189,7 +238,11 @@ func (h *harness) envList() []string {
 }
 
 func (h *harness) command() *exec.Cmd {
-	cmd := exec.Command(h.adapter)
+	name, args := h.adapter, []string(nil)
+	if h.tty {
+		name, args = "python3", []string{h.ptyDriver, h.adapter}
+	}
+	cmd := exec.Command(name, args...)
 	cmd.Dir = h.workDir
 	cmd.Env = h.envList()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -281,6 +334,15 @@ func (h *harness) start() *session {
 		}
 	})
 	return s
+}
+
+// startOnTTY is start with the adapter's stdio on a pseudo-terminal: it then
+// takes the branches it takes in a tmux pane (echo off, announcements drawn in
+// place) and its output arrives with the escape sequences it actually emits.
+func (h *harness) startOnTTY() *session {
+	h.t.Helper()
+	h.tty = true
+	return h.start()
 }
 
 func (s *session) send(line string) {
@@ -855,6 +917,153 @@ func TestTurnInFlightIsAnnouncedBeforeTheReadyMarker(t *testing.T) {
 	}
 }
 
+// A turn is silent from its announcement until the reply lands, and gc's
+// execution backstop reads a pane with no output inside its grace window as a
+// stalled seat and drains it — which is what happened to every turn longer
+// than ~90 s (2026-09-09). On a tty the adapter therefore redraws the busy
+// line in place while the turn runs: fresh output for tmux, an unchanged pane
+// for everything that reads the tail.
+func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ready = "zcode-repl ready"
+		busy  = "zcode-repl turn in flight (C-c to interrupt)"
+	)
+	reply := strings.Repeat("x", 60) // proves autowrap is restored for replies
+	h := newHarness(t, map[string]string{
+		"STUB_RESPONSE":             reply,
+		"STUB_SLEEP":                "20", // a ceiling only: the turn is released below
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+	release := filepath.Join(h.workDir, "turn-release")
+	h.env["STUB_RELEASE_FILE"] = release
+
+	s := h.startOnTTY()
+	// The CRLF is the line discipline's, so this also proves stdout is a tty.
+	s.waitForOutput(ready+"\r\n", adapterWaitBudget)
+	readyOffset := strings.Index(s.output(), ready+"\r\n")
+	s.send("a turn longer than the heartbeat")
+
+	// Observe two redraws; disabling autowrap must keep the announcement on
+	// one physical row, including panes narrower than the message.
+	draw := "\x1b[?7l" + busy + "\x1b[?7h"
+	redraw := draw + strings.Repeat("\r\x1b[2K"+draw, 2)
+	s.waitForOutput(redraw, adapterWaitBudget)
+	midTurn := through(t, s.output()[readyOffset:], redraw)
+
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatalf("release turn: %v", err)
+	}
+	finished := reply + "\r\n" + ready + "\r\n"
+	s.waitForOutput(finished, adapterWaitBudget)
+	afterTurn := through(t, s.output()[readyOffset:], finished)
+
+	for _, width := range []int{80, 30, len(busy)} {
+		t.Run(fmt.Sprintf("width=%d", width), func(t *testing.T) {
+			pane := renderPane(t, midTurn, width)
+			if len(pane) != 1 || !strings.HasPrefix(pane[0], "zcode-repl turn in flight") {
+				t.Fatalf("want one busy row mid-turn, got:\n%q", pane)
+			}
+			if width >= len(busy) && pane[0] != busy {
+				t.Fatalf("busy line = %q, want %q", pane[0], busy)
+			}
+			pane = renderPane(t, afterTurn, width)
+			if want := renderPane(t, finished, width); !equalStrings(pane, want) {
+				t.Fatalf("completion must clear busy text and restore reply wrapping:\ngot: %q\nwant: %q", pane, want)
+			}
+		})
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The heartbeat is tty-only, and that guard is the whole reason every piped
+// consumer of this adapter is unaffected by it. Nothing else pins the guard:
+// no other piped test runs a turn longer than a beat, so a regression would
+// stack redraw bytes into every piped reader unnoticed.
+func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
+	t.Parallel()
+
+	const busy = "zcode-repl turn in flight (C-c to interrupt)"
+	// The stub holds the turn open for several beat periods: had the guard
+	// regressed, the redraws would have landed before the turn completes.
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "3",
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+
+	s := h.start()
+	s.waitForOutput("zcode-repl ready\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+	s.waitForOutput(busy+"\n", adapterWaitBudget)
+	s.waitForOutput("ok\n", adapterWaitBudget)
+
+	out := s.output()
+	if strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("heartbeat redraw bytes reached a piped consumer:\n%q", out)
+	}
+	if n := strings.Count(out, busy); n != 1 {
+		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// A non-completing child must not mask inactivity beyond the configured
+// heartbeat lifetime. The child outlives the one-second budget; it still
+// completes normally, but no beat may land at or after the deadline.
+func TestTurnHeartbeatExpiresBeforeTheChildCompletes(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                    "3",
+		"ZCODE_REPL_HEARTBEAT_SECS":     "1",
+		"ZCODE_REPL_HEARTBEAT_MAX_SECS": "1",
+	})
+	s := h.startOnTTY()
+	s.waitForOutput("zcode-repl ready\r\n", adapterWaitBudget)
+	s.send("outlive the heartbeat budget")
+	s.waitForOutput("ok\r\nzcode-repl ready\r\n", adapterWaitBudget)
+	if n := strings.Count(s.output(), "zcode-repl turn in flight"); n != 1 {
+		t.Fatalf("busy announcement appeared %d times, want only the initial announcement after heartbeat expiry:\n%q", n, s.output())
+	}
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// Malformed heartbeat settings are config errors like the adapter's other
+// preconditions: exit 78 naming the variable, rather than reaching sleep with
+// a value it cannot use.
+func TestMalformedHeartbeatConfigurationIsAConfigError(t *testing.T) {
+	t.Parallel()
+
+	// An empty value is deliberately absent: ${ZCODE_REPL_HEARTBEAT_SECS:-30}
+	// treats unset and empty alike, so both take the default rather than dying.
+	for _, key := range []string{"ZCODE_REPL_HEARTBEAT_SECS", "ZCODE_REPL_HEARTBEAT_MAX_SECS"} {
+		for _, value := range []string{"0", "-1", "30s", "abc", "9999999999999999999999"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				t.Parallel()
+
+				h := newHarness(t, map[string]string{key: value})
+				if _, code := h.run("hello\n"); code != 78 {
+					t.Fatalf("%s=%q exit code = %d, want 78 (EX_CONFIG)", key, value, code)
+				}
+				if !strings.Contains(h.stderr, key) {
+					t.Fatalf("exit 78 did not name the rejected variable; stderr = %q", h.stderr)
+				}
+			})
+		}
+	}
+}
+
 // Behavior 6: five consecutive failures exit 1 with no trailing marker, so
 // liveness and readiness both go red.
 func TestFiveConsecutiveFailuresBailWithoutMarker(t *testing.T) {
@@ -1087,6 +1296,32 @@ func TestSessionKeyComesFromGCSession(t *testing.T) {
 	// Path-unsafe characters are folded to underscores.
 	if _, err := os.Stat(h.sidPath("gascity_gc.worker-9")); err != nil {
 		t.Fatalf("sid file not written under the folded session key: %v", err)
+	}
+}
+
+// The adapter's `tr -c` walks bytes and the reader's sanitizer must walk the
+// same bytes, or a non-ASCII session name folds to a different width on each
+// side and the reader looks in a scope the adapter never wrote. LC_ALL=C pins
+// tr to bytes on every platform; the reader test pins the Go side.
+func TestNonASCIISessionNameSanitizesByteWiseOnBothSides(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_utf8"})
+	h.env["GC_SESSION"] = "wörker"
+	h.env["GC_SESSION_ID"] = "gcg-sessïon"
+	h.run("non-ascii name\n")
+
+	// "ö" and "ï" are two UTF-8 bytes each: two underscores, not one.
+	scope := "w__rker@gcg-sess__on#1"
+	if _, err := os.Stat(h.sidPath("w__rker@gcg-sess__on")); err != nil {
+		t.Fatalf("sid not written under the byte-wise folded key: %v", err)
+	}
+	mirror := filepath.Join(h.mirrorDir, scope, "sess_utf8.json")
+	if _, err := os.Stat(mirror); err != nil {
+		t.Fatalf("mirror not written under the byte-wise folded scope: %v", err)
+	}
+	if got := sessionlog.FindZCodeSessionFileByScope([]string{h.mirrorDir}, h.workDir, "wörker", "gcg-sessïon", "1"); got != mirror {
+		t.Fatalf("reader resolved %q for the non-ASCII seat, want the adapter's %q", got, mirror)
 	}
 }
 
@@ -1480,9 +1715,39 @@ type mirrorExport struct {
 }
 
 // pendingSessionID mirrors the adapter's scope-derived placeholder id for turns
-// canceled before a session id existed.
+// canceled before a session id existed, folding the scope byte-wise the way
+// the adapter's writers and the engine's reader do.
 func (h *harness) pendingSessionID() string {
-	return "pending-" + regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(h.epochScope(), "_")
+	scope := []byte(h.epochScope())
+	for i, c := range scope {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			scope[i] = '_'
+		}
+	}
+	return "pending-" + string(scope)
+}
+
+// assertLiveScopes fails unless the live mirror root holds exactly scopes.
+func (h *harness) assertLiveScopes(scopes ...string) {
+	h.t.Helper()
+	entries, err := os.ReadDir(h.mirrorDir)
+	if err != nil {
+		h.t.Fatalf("read live mirror root: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !equalStrings(names, scopes) {
+		h.t.Fatalf("live mirror root = %v, want exactly %v", names, scopes)
+	}
+}
+
+// archiveRoot is where the adapter moves superseded mirror scopes.
+func (h *harness) archiveRoot() string {
+	return filepath.Join(h.home, ".local", "state", "gascity", "zcode", "archived-transcripts")
 }
 
 // epochScope mirrors the adapter's per-seat, per-epoch mirror directory, which
@@ -1528,6 +1793,87 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// through returns raw up to and including its last occurrence of needle, so a
+// pane rendered from it is the pane the instant that output landed rather than
+// whatever a later chunk had half-delivered. An absent needle fails the test
+// rather than returning a silently truncated prefix, the same way renderPane
+// refuses to misrender input it does not understand.
+func through(t *testing.T, raw, needle string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, needle)
+	if i < 0 {
+		t.Fatalf("needle %q never arrived in the output:\n%q", needle, raw)
+	}
+	return raw[:i+len(needle)]
+}
+
+// renderPane replays a tty byte stream at a bounded terminal width, for the
+// controls the adapter emits: CR, LF, erase-line (ESC[2K), cursor-up
+// (ESC[1A), and autowrap (ESC[?7l/h). Any other escape fails the test rather
+// than misrendering. Trailing empty rows are dropped, as tmux capture-pane
+// drops them.
+func renderPane(t *testing.T, raw string, width int) []string {
+	t.Helper()
+	rows := []string{""}
+	row, col := 0, 0
+	autowrap := true
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; c {
+		case '\r':
+			col = 0
+		case '\n':
+			row++
+			if row == len(rows) {
+				rows = append(rows, "")
+			}
+		case 0x1b:
+			switch {
+			case strings.HasPrefix(raw[i:], "\x1b[?7l"), strings.HasPrefix(raw[i:], "\x1b[?7h"):
+				autowrap = raw[i+4] == 'h'
+				i += 4
+				continue
+			case strings.HasPrefix(raw[i:], "\x1b[2K"):
+				rows[row] = ""
+			case strings.HasPrefix(raw[i:], "\x1b[1A"):
+				if row == 0 {
+					t.Fatalf("cursor moved above the pane at byte %d:\n%q", i, raw)
+				}
+				row--
+			default:
+				t.Fatalf("unrendered escape at byte %d: %q", i, raw[i:])
+			}
+			i += 3
+		default:
+			if width > 0 && col >= width {
+				if !autowrap {
+					col = width - 1
+				} else {
+					row++
+					col = 0
+					if row == len(rows) {
+						rows = append(rows, "")
+					}
+				}
+			}
+			line := rows[row]
+			for len(line) < col {
+				line += " "
+			}
+			if col < len(line) {
+				line = line[:col] + string([]byte{c}) + line[col+1:]
+			} else {
+				line += string([]byte{c})
+			}
+			rows[row] = line
+			col++
+		}
+	}
+	for len(rows) > 1 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return rows
 }
 
 // extractPyFunc slices a top-level function definition out of the embedded
@@ -1703,14 +2049,15 @@ func TestSeatsSharingASessionNameKeepSeparateConversations(t *testing.T) {
 }
 
 // State persisted before the scope carried the seat belongs to the one seat
-// that then had the name — or, in the collision this fix removes, to both. The
-// first start under the seat scope takes it over, so the conversation resumes
-// across the adapter upgrade and the adopted copy stops sitting adjacent to
-// the live one for the model to read.
+// that then had the name. A RESTARTED seat's first start under the seat scope
+// takes it over — gc bumps GC_RUNTIME_EPOCH on every wake, so a generation
+// above one says this seat already ran — and the conversation resumes across
+// the adapter upgrade with no stale mirror left adjacent to the live one.
 func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, map[string]string{"STUB_SID": "sess_before_upgrade"})
+	h.env["GC_RUNTIME_EPOCH"] = "1"
 	h.run("before the upgrade\n")
 	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
 	legacy := []string{
@@ -1726,6 +2073,7 @@ func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 
 	h.resetLog()
 	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
 	h.run("after the upgrade\n")
 	if call := h.calls()[0]; !containsString(call, "--resume=sess_before_upgrade") {
 		t.Fatalf("seat did not resume the conversation it inherited: %q", call)
@@ -1757,5 +2105,213 @@ func TestSeatAdoptsStateLeftUnderTheNameOnlyScope(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("name-only state left behind after adoption: %s (%v)", path, err)
 		}
+	}
+}
+
+// A fresh seat re-seated into a closed sibling's slot shares the sibling's
+// session name and epoch, and starts on its first generation. Name-only state
+// of that name is the DEAD sibling's, not this seat's: adopting it would
+// --resume the dead conversation and rekey the dead seat's transcript under
+// the wrong bead. The fresh seat leaves it alone, and the sibling's transcript
+// stays readable under the name-only scope its own bead falls back to.
+func TestFreshSeatDoesNotAdoptAClosedSiblingsNameOnlyState(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_closed_sibling"})
+	h.env["GC_RUNTIME_EPOCH"] = "1"
+	h.run("the sibling speaks\n")
+
+	h.resetLog()
+	h.env["GC_SESSION_ID"] = "gcg-session-b2f5746a"
+	h.env["STUB_SID"] = "sess_fresh_seat"
+	h.run("the fresh seat speaks\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("fresh seat resumed the closed sibling's conversation: %q", arg)
+		}
+	}
+	if got := h.sid(); got != "sess_fresh_seat" {
+		t.Fatalf("fresh seat sid = %q, want its own sess_fresh_seat", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_closed_sibling.json")); !os.IsNotExist(err) {
+		t.Fatalf("closed sibling's mirror rekeyed under the fresh seat's scope: %v", err)
+	}
+	export := h.readExport("sess_fresh_seat")
+	var prompts []string
+	for _, message := range export.Messages {
+		if message.Info.Role == "user" {
+			prompts = append(prompts, message.Parts[0].Text)
+		}
+	}
+	if want := []string{"the fresh seat speaks"}; !equalStrings(prompts, want) {
+		t.Fatalf("fresh seat mirror prompts = %q, want only its own: %q", prompts, want)
+	}
+
+	// The sibling's bead never wrote a seat scope, so gc resolves its transcript
+	// through the name-only scope (live root or archive). It must still be the
+	// sibling's file, not the fresh seat's.
+	sibling := sessionlog.FindZCodeSessionFileByScope(
+		[]string{h.mirrorDir, h.archiveRoot()}, h.workDir, "test-session", "gcg-session-575a839d", "1")
+	if filepath.Base(sibling) != "sess_closed_sibling.json" {
+		t.Fatalf("closed sibling's transcript resolved to %q, want its own sess_closed_sibling.json", sibling)
+	}
+	// It is served from the archive: the live root the model browses carries
+	// only the fresh seat's scope, and the sibling's sid and CLI state are gone.
+	if want := filepath.Join(h.archiveRoot(), "test-session#1", "sess_closed_sibling.json"); sibling != want {
+		t.Fatalf("closed sibling's transcript at %q, want archived at %q", sibling, want)
+	}
+	h.assertLiveScopes(h.epochScope())
+	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
+	for _, gone := range []string{h.sidPath("test-session"), filepath.Join(stateRoot, "homes", "test-session#1")} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("closed sibling's name-only state survived the seat's start: %s (%v)", gone, err)
+		}
+	}
+}
+
+// Name-only state at an epoch the seat is not on — a reset happened since the
+// previous adapter wrote it — matches no per-seat sweep, so it lingered in the
+// live tree forever. A seat-keyed start sweeps every name-only entry of its
+// own session name: sids and CLI homes are dropped, mirrors are archived.
+func TestSeatSweepsStaleNameOnlyStateOfItsName(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	stateRoot := filepath.Join(h.home, ".local", "state", "gascity", "zcode")
+	staleSid := filepath.Join(stateRoot, "sids", "test-session#3")
+	staleHome := filepath.Join(stateRoot, "homes", "test-session#3")
+	staleMirror := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{filepath.Dir(staleSid), staleHome, staleMirror} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(staleSid, []byte("sess_old\n"), 0o600); err != nil {
+		t.Fatalf("seed stale sid: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleHome, "child-home"), []byte(staleHome+"\n"), 0o644); err != nil {
+		t.Fatalf("seed stale home: %v", err)
+	}
+	body := `{"info":{"id":"sess_old","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`
+	if err := os.WriteFile(filepath.Join(staleMirror, "sess_old.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("seed stale mirror: %v", err)
+	}
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+	for _, arg := range h.calls()[0] {
+		if strings.HasPrefix(arg, "--resume=") {
+			t.Fatalf("seat resumed a stale name-only conversation: %q", arg)
+		}
+	}
+	for _, gone := range []string{staleSid, staleHome} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("stale name-only state survived: %s (%v)", gone, err)
+		}
+	}
+	h.assertLiveScopes(h.epochScope())
+	archived := filepath.Join(h.archiveRoot(), "test-session#3", "sess_old.json")
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("stale name-only transcript was destroyed rather than archived: %v", err)
+	}
+	// And it still resolves for the bead that wrote it, by its own scope.
+	if got := sessionlog.FindZCodeSessionFileByScope(
+		[]string{h.mirrorDir, h.archiveRoot()}, h.workDir, "test-session", "", "3"); got != archived {
+		t.Fatalf("archived name-only transcript resolved to %q, want %q", got, archived)
+	}
+}
+
+// Name-only scopes collide across beads: an earlier occupant of this session
+// name was archived under the scope before a later one wrote a fresh live
+// scope of the same name. Archiving the later one adds to the archived scope;
+// it must not replace it, because the earlier bead's transcript has no other
+// copy.
+func TestArchiveMergesIntoAnAlreadyArchivedNameOnlyScope(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	archivedScope := filepath.Join(h.archiveRoot(), "test-session#3")
+	liveScope := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{archivedScope, liveScope} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	mirror := func(id string) []byte {
+		return []byte(`{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`)
+	}
+	if err := os.WriteFile(filepath.Join(archivedScope, "sess_earlier.json"), mirror("sess_earlier"), 0o644); err != nil {
+		t.Fatalf("seed archived mirror: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(liveScope, "sess_later.json"), mirror("sess_later"), 0o644); err != nil {
+		t.Fatalf("seed live mirror: %v", err)
+	}
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+
+	h.assertLiveScopes(h.epochScope())
+	for _, name := range []string{"sess_earlier.json", "sess_later.json"} {
+		if _, err := os.Stat(filepath.Join(archivedScope, name)); err != nil {
+			t.Fatalf("archived scope lost %s: %v", name, err)
+		}
+	}
+}
+
+// A failed merge into an occupied archive slot must not take the live scope
+// with it. Removing the source unconditionally meant one unwritable or full
+// archive tree destroyed the only copy of a transcript, on exactly the I/O
+// failure archiving exists to survive.
+func TestArchiveKeepsTheLiveScopeWhenTheMergeCopyFails(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this fault injection relies on")
+	}
+
+	h := newHarness(t, map[string]string{"STUB_SID": "sess_epoch_four"})
+	archivedScope := filepath.Join(h.archiveRoot(), "test-session#3")
+	liveScope := filepath.Join(h.mirrorDir, "test-session#3")
+	for _, dir := range []string{archivedScope, liveScope} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	mirror := func(id string) []byte {
+		return []byte(`{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(h.workDir) + `"},"messages":[]}`)
+	}
+	archived := filepath.Join(archivedScope, "sess_earlier.json")
+	if err := os.WriteFile(archived, mirror("sess_earlier"), 0o644); err != nil {
+		t.Fatalf("seed archived mirror: %v", err)
+	}
+	live := filepath.Join(liveScope, "sess_later.json")
+	if err := os.WriteFile(live, mirror("sess_later"), 0o644); err != nil {
+		t.Fatalf("seed live mirror: %v", err)
+	}
+	// Readable and searchable but not writable: the merge copy fails partway,
+	// the way a full or root-owned archive tree does.
+	if err := os.Chmod(archivedScope, 0o500); err != nil {
+		t.Fatalf("chmod archived scope: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(archivedScope, 0o755) })
+
+	h.env["GC_SESSION_ID"] = "gcg-session-575a839d"
+	h.env["GC_CONTINUATION_EPOCH"] = "4"
+	h.env["GC_RUNTIME_EPOCH"] = "2"
+	h.run("epoch four\n")
+
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("live transcript destroyed by a failed archive copy: %v", err)
+	}
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("already-archived transcript lost: %v", err)
+	}
+	// The seat still started: a failed archive is a leak to report, not a
+	// reason to strand the pane.
+	if _, err := os.Stat(filepath.Join(h.mirrorDir, h.epochScope(), "sess_epoch_four.json")); err != nil {
+		t.Fatalf("seat did not mirror its own turn after the failed archive: %v", err)
 	}
 }
