@@ -98,7 +98,8 @@ const (
 	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
 	// acceptance_bd_contract tag and bd binary the preceding step already
 	// resolved onto PATH. No new job, trigger or permission.
-	expectedCIExecutionHash     = "5a2eedb5eb5a94b471b9a8d4383ebab75b57006b697479ba359abf1e3c27800e"
+	// Preserve the integration proof filters for route notifications and plugins.
+	expectedCIExecutionHash     = "d2408f8be38301ffba8bb2140dc3017751ca5a95891e90823b00153e3937c7b3"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -207,6 +208,11 @@ var requiredFilterPaths = map[string][]string{
 		".github/workflows/**",
 		"Makefile",
 		"**/*.go",
+		"internal/bootstrap/packs/core/assets/scripts/nudge-on-route.sh",
+		"internal/bootstrap/packs/core/orders/nudge-on-route.toml",
+		"internal/bootstrap/packs/core/overlay/per-provider/opencode/**",
+		"internal/bootstrap/packs/core/overlay/per-provider/mimocode/**",
+		"internal/hooks/opencode_plugin.test.mjs",
 		"scripts/test-integration-shard",
 		"scripts/test-go-test-shard",
 		"scripts/runtime-tmux-tests.manifest",

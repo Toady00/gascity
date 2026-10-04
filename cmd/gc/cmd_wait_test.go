@@ -2460,7 +2460,7 @@ func TestClearSessionWaitHoldIfIdle_UsesSessionWaitLookup(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID); err != nil {
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
 	}
 
@@ -2487,7 +2487,7 @@ func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID); err == nil {
+	if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), sessionBead.ID, time.Now().UTC()); err == nil {
 		t.Fatal("expected clearSessionWaitHoldIfIdle to return load error")
 	}
 

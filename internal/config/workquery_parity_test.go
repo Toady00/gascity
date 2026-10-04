@@ -32,7 +32,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScriptWithGraphAnchorFallback() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 			poolDemandFirstRowFunctionScript(topo) +
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
@@ -42,7 +42,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScriptWithGraphAnchorFallback() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 		poolDemandFirstRowFunctionScript(topo) +
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
@@ -83,9 +83,9 @@ func oldEffectiveRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(a, topo, target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(a, topo, target, legacyTarget)
 }
 
 func oldEffectivePoolDemandQuery(a *Agent, topo QueryTopology) string {
@@ -400,6 +400,7 @@ func renormalizeFederatedCommand(federated string) string {
 	// migration fallback (which keeps --sort oldest for its retirement window).
 	federated = strings.ReplaceAll(federated, `--limit=20) || exit $?`, `--limit=20 2>/dev/null)`)
 	federated = strings.ReplaceAll(federated, `--limit=20 2>/dev/null) || exit $?`, `--limit=20 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--limit=0) || exit $?`, `--limit=0 2>/dev/null)`)
 	return federated
 }
 
@@ -446,6 +447,9 @@ func TestWorkQueryGolden(t *testing.T) {
 		{"normal", &Agent{Name: "worker"}},
 		{"pool", &Agent{Name: "worker", PoolName: "worker-pool"}},
 		{"legacy", &Agent{Name: ControlDispatcherAgentName, Dir: "rig"}},
+		// A canonical singleton (max=1, no namepool) is the one shape whose
+		// routed tier admits the named origin (poolDemandOriginGateScript).
+		{"singleton", &Agent{Name: "worker", MaxActiveSessions: ptrInt(1)}},
 	}
 	for _, shape := range shapes {
 		for _, v := range parityVariants() {
