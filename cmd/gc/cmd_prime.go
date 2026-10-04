@@ -168,7 +168,16 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 	sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
 	isACP := sessionTransport == config.SessionTransportACP
 
-	delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, cfg.Runtimes)
+	providerName := ""
+	if resolved != nil {
+		providerName = resolved.Name
+	}
+	tp := TemplateParams{
+		Prompt: prompt, IsACP: isACP, ResolvedProvider: resolved,
+		HookEnabled:              config.AgentHasHooks(a, &cfg.Workspace, providerName, cfg.Providers),
+		EffectiveSessionProvider: effProvider, CityRuntimes: cfg.Runtimes,
+	}
+	delivery, dErr := templatePromptDelivery(tp)
 
 	configuredMode := "arg"
 	switch {
@@ -184,6 +193,8 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 		effectiveMode = "hard-fail"
 	case delivery.OversizedFallback:
 		effectiveMode = "nudge-fallback"
+	case rolePromptSuppliedByHook(tp):
+		effectiveMode = "hook"
 	case isACP || configuredMode == "none":
 		effectiveMode = "nudge"
 	case delivery.PromptFlag != "":

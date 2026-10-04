@@ -56,16 +56,14 @@ type BuiltinProviderSpec struct {
 	// provider supplies the rendered role prompt to every model generation
 	// (a system-prompt transform running `gc prime --hook` without the
 	// managed SessionStart markers), rather than delivering it once at
-	// session start. When true, a resumed conversation does not need the
-	// role replayed as a user turn: the hook already carries it. The hook
-	// decorates generations but never starts one, so a restart turn is still
-	// required to wake the session.
+	// session start. When the runtime stages and loads that hook, fresh and
+	// resumed conversations do not need a user-message copy of the role.
+	// The hook decorates generations but never starts one; activation is
+	// supplied separately by an initial message, nudge, or fresh-start kickoff.
 	//
-	// Only providers that actually resume a conversation qualify (ResumeFlag
-	// set): groq and cerebras launch the opencode binary and are hook-staged
-	// as opencode, but with no resume flag every restart is a fresh process,
-	// so dropping the role on their "resume" branch would strand a fresh
-	// session unprimed.
+	// Currently verified for opencode and mimocode. The groq and cerebras
+	// profiles also launch opencode but retain explicit launch-time delivery
+	// until their hook-backed lifecycle is independently verified.
 	HookSuppliesRolePerTurn bool
 	// ManagedOverlayHooks records that this builtin's bundled overlay ships a
 	// lifecycle hook that gc stages for the launch family unconditionally

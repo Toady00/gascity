@@ -25,7 +25,7 @@ func resolveResumeRoleTemplate(t *testing.T, providerName string, providers map[
 	return resolveResumeRoleTemplateWithNudge(t, providerName, providers, installHooks, agentSession, hooksInstalled, "configured nudge")
 }
 
-func resolveResumeRoleTemplateWithNudge(t *testing.T, providerName string, providers map[string]config.ProviderSpec, installHooks []string, agentSession string, hooksInstalled *bool, nudge string) TemplateParams {
+func resolveResumeRoleTemplateWithNudge(t *testing.T, providerName string, providers map[string]config.ProviderSpec, installHooks []string, agentSession string, hooksInstalled *bool, nudge string, cityRuntime ...string) TemplateParams {
 	t.Helper()
 
 	cityPath := t.TempDir()
@@ -41,6 +41,9 @@ func resolveResumeRoleTemplateWithNudge(t *testing.T, providerName string, provi
 		beaconTime: time.Unix(0, 0),
 		beadNames:  make(map[string]string),
 		stderr:     io.Discard,
+	}
+	if len(cityRuntime) > 0 {
+		params.sessionProvider = cityRuntime[0]
 	}
 	agentCfg := &config.Agent{
 		Name:           "worker",
@@ -58,7 +61,7 @@ func resolveResumeRoleTemplateWithNudge(t *testing.T, providerName string, provi
 	return tp
 }
 
-func TestResumeRolePromptSuppliedByHook(t *testing.T) {
+func TestRolePromptSuppliedByHook(t *testing.T) {
 	no := false
 	wrappedBase := "builtin:opencode"
 	wrapped := map[string]config.ProviderSpec{"wrapped-opencode": {Base: &wrappedBase}}
@@ -152,15 +155,15 @@ func TestResumeRolePromptSuppliedByHook(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			tp := resolveResumeRoleTemplate(t, tc.provider, tc.providers, tc.installHooks, tc.agentSession, tc.hooksInstalled)
-			if got := resumeRolePromptSuppliedByHook(tp); got != tc.want {
-				t.Fatalf("resumeRolePromptSuppliedByHook = %v, want %v (HookEnabled=%v IsACP=%v ancestor=%q)",
+			if got := rolePromptSuppliedByHook(tp); got != tc.want {
+				t.Fatalf("rolePromptSuppliedByHook = %v, want %v (HookEnabled=%v IsACP=%v ancestor=%q)",
 					got, tc.want, tp.HookEnabled, tp.IsACP, tp.ResolvedProvider.BuiltinAncestor)
 			}
 		})
 	}
 
 	t.Run("nil resolved provider", func(t *testing.T) {
-		if resumeRolePromptSuppliedByHook(TemplateParams{HookEnabled: true}) {
+		if rolePromptSuppliedByHook(TemplateParams{HookEnabled: true}) {
 			t.Fatal("a template with no resolved provider must not claim a per-turn role hook")
 		}
 	})
@@ -185,6 +188,11 @@ func prepareResumeRoleStart(t *testing.T, tp TemplateParams, resumeKey string) *
 		metadata["started_config_hash"] = "already-started"
 		metadata["session_key"] = resumeKey
 	}
+	return prepareRoleStart(t, tp, metadata)
+}
+
+func prepareRoleStart(t *testing.T, tp TemplateParams, metadata map[string]string) *preparedStart {
+	t.Helper()
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
 		Title:    "resume-role-worker",
@@ -208,9 +216,8 @@ func prepareResumeRoleStart(t *testing.T, tp TemplateParams, resumeKey string) *
 // TestResumeOnHookPrimedProviderNeverReplaysRolePrompt pins the fix for the
 // duplicated role on hook-primed providers: across repeated resumes of the
 // same provider conversation the rendered template never rides in the nudge
-// (the opencode hook supplies it to every generation), while a fresh
-// incarnation — which is what a plugin-less first turn depends on — still
-// carries the full prompt on the launch path (gastownhall/gascity#5238).
+// (the opencode hook supplies it to every generation). Fresh starts deliver
+// their initial message without persisting a second copy of the role either.
 func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
 	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
@@ -219,7 +226,7 @@ func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	// No install_agent_hooks: this is the default opencode configuration, and
 	// the overlay plugin is staged for it unconditionally.
 	tp := resolveResumeRoleTemplate(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil)
-	if !resumeRolePromptSuppliedByHook(tp) {
+	if !rolePromptSuppliedByHook(tp) {
 		t.Fatal("fixture must resolve to a hook-primed opencode template")
 	}
 	if !strings.Contains(tp.Prompt, "Base worker prompt") {
@@ -261,24 +268,199 @@ func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	}
 
 	fresh := prepareResumeRoleStart(t, tp, "")
-	payload, err := singleShellArgValue(fresh.cfg.PromptSuffix)
-	if err != nil {
-		t.Fatalf("fresh PromptSuffix encoding invalid: %v", err)
+	if fresh.cfg.PromptSuffix != "" || fresh.cfg.PromptFlag != "" {
+		t.Fatalf("fresh start submitted a role via argv: %+v", fresh.cfg)
 	}
-	if !strings.Contains(payload, "Base worker prompt") {
-		t.Fatalf("fresh start payload = %q, want the rendered role prompt on the launch path", payload)
-	}
-	if !strings.Contains(payload, "User message:\nDo the first task.") {
-		t.Fatalf("fresh start payload = %q, want initial_message on first start", payload)
-	}
-	if fresh.cfg.PromptFlag != "--prompt" {
-		t.Fatalf("fresh PromptFlag = %q, want --prompt", fresh.cfg.PromptFlag)
-	}
-	if fresh.cfg.Nudge != "configured nudge" {
-		t.Fatalf("fresh cfg.Nudge = %q, want configured nudge preserved separately", fresh.cfg.Nudge)
+	if want := wantRestartTurn + startupPromptNudgeSeparator + "User message:\nDo the first task."; fresh.cfg.Nudge != want {
+		t.Fatalf("fresh cfg.Nudge = %q, want %q", fresh.cfg.Nudge, want)
 	}
 	if !fresh.promptDelivered {
 		t.Fatal("fresh start promptDelivered = false, want true")
+	}
+}
+
+// A fresh managed conversation receives its role through the plugin and only
+// meaningful activation text through the runtime. Exercise real resolution
+// and start preparation, including wrappers and both per-generation families.
+func TestFreshHookPrimedStartActivation(t *testing.T) {
+	wrappedBase := "builtin:opencode"
+	for _, provider := range []string{"opencode", "mimocode", "wrapped-opencode"} {
+		for _, tc := range []struct {
+			name, nudge, message string
+		}{
+			{name: "idle"},
+			{name: "whitespace nudge", nudge: " \n\t"},
+			{name: "nudge", nudge: "Claim routed work."},
+			{name: "message", message: "Discuss the extraction initiative."},
+			{name: "both", nudge: "Claim routed work.", message: "Discuss the extraction initiative."},
+		} {
+			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+				providers := builtinProviderAliasesForTest(provider)
+				if provider == "wrapped-opencode" {
+					providers = map[string]config.ProviderSpec{provider: {Base: &wrappedBase}}
+				}
+				tp := resolveResumeRoleTemplateWithNudge(t, provider, providers, nil, config.SessionTransportTmux, nil, tc.nudge)
+				overrides, err := json.Marshal(map[string]string{"initial_message": tc.message})
+				if err != nil {
+					t.Fatal(err)
+				}
+				prepared := prepareRoleStart(t, tp, map[string]string{
+					"session_name": "fresh-worker", "template": "worker", "session_origin": "manual", "template_overrides": string(overrides),
+				})
+				want := tp.Beacon + startupPromptNudgeSeparator + "Confirm your role: reply with your role name and a one-sentence purpose, then wait for instructions."
+				if strings.TrimSpace(tc.nudge) != "" {
+					want = tp.Beacon + startupPromptNudgeSeparator + tc.nudge
+				}
+				if tc.message != "" {
+					if strings.TrimSpace(tc.nudge) != "" {
+						want += startupPromptNudgeSeparator
+					} else {
+						want = ""
+					}
+					want += "User message:\n" + tc.message
+				}
+				if prepared.cfg.PromptSuffix != "" || prepared.cfg.PromptFlag != "" || prepared.cfg.Nudge != want {
+					t.Fatalf("activation = (suffix=%q flag=%q nudge=%q), want nudge=%q only", prepared.cfg.PromptSuffix, prepared.cfg.PromptFlag, prepared.cfg.Nudge, want)
+				}
+				if !prepared.promptDelivered || prepared.cfg.Env[startupPromptDeliveredEnv] != "1" {
+					t.Fatal("hook-selected role delivery lost its priming metadata")
+				}
+				if prepared.promptHash != sessionpkg.PromptHash(tp.Prompt) {
+					t.Fatal("role hash must still describe the rendered template")
+				}
+			})
+		}
+	}
+}
+
+func TestFreshHookPrimedStartRecovery(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+	for _, mode := range []string{"missing-key", "stale-key", "fresh"} {
+		t.Run(mode, func(t *testing.T) {
+			tp := resolveResumeRoleTemplate(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil)
+			metadata := map[string]string{"session_name": "fresh-worker", "template": "worker", "started_config_hash": "old", "primed_at": "2026-01-01T00:00:00Z"}
+			if mode == "stale-key" {
+				metadata["session_key"] = "gone"
+			}
+			if mode == "fresh" {
+				metadata["wake_mode"] = "fresh"
+			}
+			prepared := prepareRoleStart(t, tp, metadata)
+			if prepared.cfg.PromptSuffix != "" || prepared.cfg.PromptFlag != "" || prepared.cfg.Nudge != tp.Beacon+startupPromptNudgeSeparator+"configured nudge" {
+				t.Fatalf("recovered fresh start must activate without role replay: suffix=%q flag=%q nudge=%q", prepared.cfg.PromptSuffix, prepared.cfg.PromptFlag, prepared.cfg.Nudge)
+			}
+			if !prepared.promptDelivered {
+				t.Fatal("fresh incarnation must select hook priming despite old metadata")
+			}
+		})
+	}
+}
+
+func TestFreshRoleLaunchFallbacks(t *testing.T) {
+	no := false
+	standalone := ""
+	for _, tc := range []struct {
+		name, provider, transport string
+		providers                 map[string]config.ProviderSpec
+		hooksInstalled            *bool
+	}{
+		{name: "hook opt-out", provider: "opencode", transport: config.SessionTransportTmux, hooksInstalled: &no},
+		{name: "ACP", provider: "opencode", transport: config.SessionTransportACP},
+		{name: "SessionStart hook", provider: "pi", transport: config.SessionTransportTmux},
+		{name: "standalone name collision", provider: "opencode", transport: config.SessionTransportTmux, providers: map[string]config.ProviderSpec{"opencode": {Base: &standalone, Command: "opencode"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providers := tc.providers
+			if providers == nil {
+				providers = builtinProviderAliasesForTest(tc.provider)
+			}
+			tp := resolveResumeRoleTemplate(t, tc.provider, providers, nil, tc.transport, tc.hooksInstalled)
+			prepared := prepareResumeRoleStart(t, tp, "")
+			if !strings.Contains(prepared.cfg.PromptSuffix+prepared.cfg.Nudge, "Base worker prompt") {
+				t.Fatal("plugin-less path lost its role carrier")
+			}
+		})
+	}
+}
+
+func TestHookPrimedRoleDoesNotUseArgvBudget(t *testing.T) {
+	tp := resolveResumeRoleTemplate(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil)
+	tp.Prompt = strings.Repeat("role ", maxPromptSuffixRawBytes)
+	// A hook-supplied role never enters argv or the oversized nudge fallback.
+	tp.EffectiveSessionProvider = "herdr"
+	_, delivery, err := templateParamsToConfigWithDelivery(tp)
+	if err != nil || delivery.OversizedFallback {
+		t.Fatalf("hook role used argv fallback: %+v, %v", delivery, err)
+	}
+	prepared := prepareResumeRoleStart(t, tp, "")
+	if prepared.cfg.PromptSuffix != "" || strings.Contains(prepared.cfg.Nudge, "role ") {
+		t.Fatal("oversized role escaped the hook carrier")
+	}
+}
+
+func TestFreshHookPrimedAutomaticKickoff(t *testing.T) {
+	for _, origin := range []string{"named", "ephemeral", "pool"} {
+		t.Run(origin, func(t *testing.T) {
+			tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
+			metadata := map[string]string{"session_name": "worker", "template": "worker", "session_origin": origin}
+			want := "Begin your startup routine as your instructions describe. If it finds no work for you, end your turn without a status report."
+			if origin == "pool" {
+				metadata["session_origin"] = "ephemeral"
+				metadata["pool_managed"] = "true"
+				want = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
+			}
+			prepared := prepareRoleStart(t, tp, metadata)
+			if prepared.cfg.Nudge != tp.Beacon+startupPromptNudgeSeparator+want || prepared.cfg.PromptSuffix != "" {
+				t.Fatalf("automated fresh start lost its kickoff: suffix=%q nudge=%q", prepared.cfg.PromptSuffix, prepared.cfg.Nudge)
+			}
+			metadata["template_overrides"] = `{"initial_message":"Do my actual task."}`
+			prepared = prepareRoleStart(t, tp, metadata)
+			if prepared.cfg.Nudge != "User message:\nDo my actual task." {
+				t.Fatalf("kickoff displaced initial message: %q", prepared.cfg.Nudge)
+			}
+		})
+	}
+}
+
+func TestFreshHookPrimedForceFreshWithValidKey(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
+	prepared := prepareRoleStart(t, tp, map[string]string{
+		"session_name": "worker", "template": "worker", "session_origin": "manual", "started_config_hash": "old",
+		"session_key": "valid", "wake_mode": "fresh", "template_overrides": `{"initial_message":"Start again."}`,
+	})
+	if prepared.cfg.Nudge != "User message:\nStart again." || prepared.cfg.PromptSuffix != "" || !prepared.promptDelivered {
+		t.Fatalf("forced fresh start treated as resume: nudge=%q suffix=%q primed=%v", prepared.cfg.Nudge, prepared.cfg.PromptSuffix, prepared.promptDelivered)
+	}
+}
+
+func TestHookRoleRequiresLocalStagingRuntime(t *testing.T) {
+	for _, name := range []string{"", "tmux", "herdr", "ssh:remote", "exec:/worker", "k8s", "hybrid", "subprocess", "custom-runtime"} {
+		t.Run(name, func(t *testing.T) {
+			// session=tmux selects the terminal transport, not the city runtime.
+			tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "configured nudge", name)
+			cfg, _, err := templateParamsToConfigWithDelivery(tp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantHook := name == "" || name == "tmux" || name == "herdr"
+			if (cfg.PromptSuffix == "") != wantHook {
+				t.Fatalf("runtime=%q suffix=%q, hook eligible=%v", name, cfg.PromptSuffix, wantHook)
+			}
+		})
+	}
+}
+
+func TestFreshHookPrimedEmptyRoleDoesNotKickoff(t *testing.T) {
+	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
+	tp.Prompt = ""
+	prepared := prepareRoleStart(t, tp, map[string]string{"session_name": "worker", "template": "worker", "session_origin": "manual"})
+	if prepared.cfg.Nudge != "" || prepared.cfg.PromptSuffix != "" || prepared.promptDelivered {
+		t.Fatal("empty role manufactured a kickoff or a priming selection")
 	}
 }
 
@@ -293,7 +475,7 @@ func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
-	if !resumeRolePromptSuppliedByHook(tp) {
+	if !rolePromptSuppliedByHook(tp) {
 		t.Fatal("fixture must resolve to a hook-primed opencode template")
 	}
 	if tp.Hints.Nudge != "" {
@@ -335,7 +517,7 @@ func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			tp := resolveResumeRoleTemplate(t, tc.provider, builtinProviderAliasesForTest(tc.provider), tc.installHooks, config.SessionTransportTmux, tc.hooksInstalled)
-			if resumeRolePromptSuppliedByHook(tp) {
+			if rolePromptSuppliedByHook(tp) {
 				t.Fatal("fixture must not resolve to a hook-primed template")
 			}
 			prepared := prepareResumeRoleStart(t, tp, "resume-key")
