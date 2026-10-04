@@ -45,11 +45,18 @@ ready query. Claimed or closed work is discarded; blocked work stays pending.
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
 pool-routed bead's `routed_to` is the members' `template`, not a name
-`gc session nudge` can resolve. The script handles both: it enumerates the
-pool's active members via `gc session list --template <routed_to>`. A template
-with one active member receives one nudge; a multi-member pool is left to the
-controller's bounded idle-claim backstop. A target with no members is nudged
-directly, preserving named-session and explicit-slot routing.
+`gc session nudge` can resolve. The script reads `gc agent list --json` once
+per exec to identify pool bases by qualified name and `routes_to_pool`.
+Capacity information in `pool` alone does not establish notification ownership.
+Pool-base notifications belong to the controller's bounded idle-claim
+backstop, including empty pools and pools with only one active member.
+Other targets use `gc session list --template <routed_to>`: a template with one
+active member receives one nudge, and a target with no members is nudged
+directly. This preserves named-session and explicit-slot routing. Failed or
+malformed lookups retain pending work for retry instead of guessing a target.
+This pack revision requires a CLI exposing `routes_to_pool` in agent-list
+output. Deploy it with its matching binary; older CLI output fails the read
+and retains pending work rather than silently misclassifying named sessions.
 
 The script atomically records an event cursor, pending deliveries, retry times,
 the last observed route, and the last successfully notified route in
@@ -74,7 +81,16 @@ ACP session in that mode. The remaining default-mode gap is tracked in
 [issue #6080](https://github.com/gastownhall/gascity/issues/6080).
 
 Each run processes at most 20 due beads and leaves the remainder pending. Each
-eligible routing receives its own notification, even when targets are shared.
+eligible routing receives its own notification request, even when targets are
+shared. The queue may combine requests into a single turn; the default message
+asks the worker to claim and execute work repeatedly until no work remains.
+
+Condition checks run on the controller's orders lane. Dispatch latency depends
+on that lane's cadence and backlog. Before reading events, a check records an
+unfinished-probe marker. Normal completion removes it; interruption or the
+five-second check deadline leaves it for the next pass to schedule exec recovery
+without another network probe. Exec clears the marker under its delivery lock
+and owns read-failure backoff. The marker is recovery intent, not a process lock.
 
 Repeated observations of the same route do not resend. A claim/release or a
 change to another route makes the work eligible again. A process crash after
@@ -101,7 +117,7 @@ retention overrides (`GC_NUDGE_ON_ROUTE_WINDOW`, `GC_NUDGE_ON_ROUTE_LOOKBACK`,
 `GC_NUDGE_ON_ROUTE_RETENTION`) no longer govern correctness. The nudge text can
 still be overridden with `GC_NUDGE_ON_ROUTE_MESSAGE` through `[order.env]` or
 the controller environment. Its default asks the recipient to run
-`gc hook --claim --json` and execute any claimed work.
+`gc hook --claim --json`, execute the claimed work, and repeat until empty.
 
 Keep the order's work gate enabled and `idempotent` unset. The script also
 serializes manual runs using `flock`, or `shlock` on macOS. It requires Bash,

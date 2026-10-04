@@ -49,7 +49,12 @@ set -eu
 [ ! -e /dev/fd/9 ] || { echo 'delivery lock leaked to a child process' >&2; exit 2; }
 printf '%s\n' "$*" >> "$FIXTURE/calls"
 case "$1 $2" in
-  'events --seq') jq -s 'map(.seq) | max // 0' "$FIXTURE/events" ;;
+  'events --seq')
+    if [ -p "$FIXTURE/blocked-seq" ]; then
+      echo entered > "$FIXTURE/seq-entered"
+      read -r release < "$FIXTURE/blocked-seq"
+    fi
+    jq -s 'map(.seq) | max // 0' "$FIXTURE/events" ;;
   events*)
     [ ! -f "$FIXTURE/fail-read" ] || exit 1
     after=0
@@ -70,7 +75,12 @@ case "$1 $2" in
     esac
     jq '[.[] | select(.status == "open" and (.assignee // "") == "" and (.metadata."gc.routed_to" // "") != "")]' "$FIXTURE/beads"
     ;;
-  'session list') cat "$FIXTURE/sessions" ;;
+  'agent list')
+    [ ! -f "$FIXTURE/fail-agent-list" ] || exit 1
+    cat "$FIXTURE/agents" ;;
+  'session list')
+    [ ! -f "$FIXTURE/fail-session-list" ] || exit 1
+    cat "$FIXTURE/sessions" ;;
   'session nudge')
     [ ! -f "$FIXTURE/fail-nudge" ] || exit 1
     if [ -p "$FIXTURE/entered" ]; then
@@ -85,6 +95,7 @@ esac
 	f.write("events", "", 0o600)
 	f.write("beads", "[]", 0o600)
 	f.write("sessions", `{"sessions":[]}`, 0o600)
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1},"routes_to_pool":false}]}`, 0o600)
 	f.env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"), "FIXTURE="+dir,
 		"PACK_DIR="+dir, "GC_CITY="+dir, "GC_PACK_STATE_DIR="+filepath.Join(dir, "state"))
 	return f
@@ -187,6 +198,70 @@ func TestRouteNotificationCreationTriggersDelivery(t *testing.T) {
 	}
 }
 
+// A killed probe must hand recovery to exec on the next pass, even if the
+// event service remains slow and no additional event arrives.
+func TestRouteNotificationInterruptedCheckSchedulesRecovery(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{},"notified":{},"retry":{}}`, 0o600)
+	f.seed("bead.created", true)
+	for _, name := range []string{"blocked-seq", "seq-entered"} {
+		if err := unix.Mkfifo(filepath.Join(f.dir, name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entered, err := os.OpenFile(filepath.Join(f.dir, "seq-entered"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entered.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := make(chan orders.TriggerResult, 1)
+	go func() {
+		results <- orders.CheckTriggerWithOptions(f.order, time.Now(), nil, f.bus, nil, orders.TriggerOptions{
+			ConditionCtx: ctx, ConditionDir: f.dir, ConditionEnv: f.env, ConditionTimeout: 30 * time.Second,
+		})
+	}()
+	ready := make(chan error, 1)
+	go func() { _, err := bufio.NewReader(entered).ReadString('\n'); ready <- err }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("condition never reached the event probe")
+	}
+	cancel() // same process-group cancellation path as the check deadline
+	if result := <-results; result.Due {
+		t.Fatalf("interrupted probe result = %+v, want not due", result)
+	}
+	before, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.due() {
+		t.Fatal("interrupted probe did not schedule recovery without another API read")
+	}
+	after, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("recovery check repeated remote reads: before=%s after=%s err=%v", before, after, err)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "blocked-seq")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("recovery nudges = %q", got)
+	}
+	if f.due() {
+		t.Fatal("successful recovery left a continuously due probe")
+	}
+}
+
 func TestRouteNotificationRetriesWithoutNewEvents(t *testing.T) {
 	f := newRouteScriptFixture(t)
 	f.seed("bead.updated", true)
@@ -209,6 +284,21 @@ func TestRouteNotificationRetriesWithoutNewEvents(t *testing.T) {
 	}
 	if got := f.nudges(); got != "worker\n" {
 		t.Fatalf("retry nudges = %q", got)
+	}
+}
+
+func TestRouteNotificationIncompleteSnapshotUsesLiveWork(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.bus.Record(events.Event{Type: "city.started"})
+	f.write("state/nudge-on-route-delivery.json", `{"version":1,"cursor":1,"pending":{"test-work":"worker"},"notified":{},"retry":{}}`, 0o600)
+	f.write("beads", `[{"id":"test-work","status":"open","metadata":{"gc.routed_to":"worker"}}]`, 0o600)
+	f.bus.Record(events.Event{Type: "bead.updated", Subject: "test-work", Payload: json.RawMessage(`{"id":"test-work"}`)})
+	f.syncEvents()
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("incomplete event discarded pending live work: %q", got)
 	}
 }
 
@@ -613,6 +703,84 @@ func TestRouteNotificationMultiplePoolMembersDeferred(t *testing.T) {
 	f.expireRetry()
 	if f.due() {
 		t.Fatal("work handed to the pool backstop remained pending for notification")
+	}
+}
+
+func TestRouteNotificationPoolOwnershipIgnoresActiveCount(t *testing.T) {
+	for _, sessions := range []string{`{"sessions":[]}`, `{"sessions":[{"name":"worker-1"}]}`} {
+		t.Run(sessions, func(t *testing.T) {
+			f := newRouteScriptFixture(t)
+			f.seed("bead.created", true)
+			f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":3},"routes_to_pool":true}]}`, 0o600)
+			f.write("sessions", sessions, 0o600)
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.nudges(); got != "" {
+				t.Fatalf("pool got direct notification: %q", got)
+			}
+			if f.due() {
+				t.Fatal("pool handoff remained pending")
+			}
+		})
+	}
+}
+
+func TestRouteNotificationLookupFailureRetries(t *testing.T) {
+	for _, failure := range []string{"fail-agent-list", "fail-session-list", "malformed-session-list"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newRouteScriptFixture(t)
+			f.seed("bead.created", true)
+			if failure == "malformed-session-list" {
+				f.write("sessions", `{}`, 0o600)
+			} else {
+				f.write(failure, "", 0o600)
+			}
+			if err := f.run(); err == nil {
+				t.Fatal("lookup failure reported success")
+			}
+			if got := f.nudges(); got != "" {
+				t.Fatalf("lookup failure fell through to nudge: %q", got)
+			}
+			if failure == "malformed-session-list" {
+				f.write("sessions", `{"sessions":[]}`, 0o600)
+			} else if err := os.Remove(filepath.Join(f.dir, failure)); err != nil {
+				t.Fatal(err)
+			}
+			f.expireRetry()
+			if !f.due() {
+				t.Fatal("lookup failure lost its retry")
+			}
+			if err := f.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.nudges(); got != "worker\n" {
+				t.Fatalf("lookup retry = %q", got)
+			}
+		})
+	}
+}
+
+func TestRouteNotificationRequiresRoutingOwnershipField(t *testing.T) {
+	f := newRouteScriptFixture(t)
+	f.seed("bead.created", true)
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1}}]}`, 0o600)
+	if err := f.run(); err == nil {
+		t.Fatal("older CLI output reported successful ownership transfer")
+	}
+	if got := f.nudges(); got != "" {
+		t.Fatalf("older CLI output guessed a target: %q", got)
+	}
+	f.expireRetry()
+	if !f.due() {
+		t.Fatal("older CLI output lost pending work")
+	}
+	f.write("agents", `{"agents":[{"qualified_name":"worker","pool":{"min":0,"max":1},"routes_to_pool":false}]}`, 0o600)
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.nudges(); got != "worker\n" {
+		t.Fatalf("upgrade retry = %q", got)
 	}
 }
 

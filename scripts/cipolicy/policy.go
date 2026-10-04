@@ -98,8 +98,14 @@ const (
 	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
 	// acceptance_bd_contract tag and bd binary the preceding step already
 	// resolved onto PATH. No new job, trigger or permission.
+	//
+	// Bumped again (rbe-west plan R2 step 1): the runner-policy job's own
+	// runs-on drops its hard-coded login list for blacksmith-2vcpu-ubuntu-2404,
+	// matching runner_policy.py, which now selects Blacksmith for every event
+	// and author. Reviewed delta: that one runs-on value, no new job, step,
+	// trigger or permission.
 	// Preserve the integration proof filters for route notifications and plugins.
-	expectedCIExecutionHash     = "d2408f8be38301ffba8bb2140dc3017751ca5a95891e90823b00153e3937c7b3"
+	expectedCIExecutionHash     = "65f5d9e1477a896353ff4800549ed657f66cd9e5f9256cb62423e81ce8d19154"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
