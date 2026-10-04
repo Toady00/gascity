@@ -1221,12 +1221,15 @@ func buildPreparedStartWithWorkDirResolver(
 			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
-	// Initial message: append to prompt on first start only, reusing the
-	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
+	// Initial message: append to the activation carrier for a fresh conversation,
+	// including hook-primed missing-key recovery. Reuse the overrides parsed by
+	// parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+	if rolePromptSuppliedByHook(tp) && (firstStart || forceFresh || !hasResumeKey) {
+		agentCfg.Nudge = hookFreshActivation(tp, candidate.info, sessionOverrides["initial_message"])
+	} else if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
@@ -1818,11 +1821,9 @@ func restartPromptNudge(prompt, nudge string) string {
 	return prependStartupPromptToNudge(prompt, nudge)
 }
 
-// resumeRolePromptSuppliedByHook reports whether a resumed session can skip
-// replaying the rendered startup prompt through its restart nudge because the
-// provider hook already supplies that prompt to every model generation. (The
-// hook decorates generations; it does not start one, which is why the branch
-// still delivers a restart turn — see resumeStartupNudge.)
+// rolePromptSuppliedByHook reports whether the provider hook supplies the role
+// to every generation, on fresh starts as well as resumes. The hook does not
+// start a turn; activation messages are delivered separately.
 //
 // All three legs must hold: the resolved provider's builtin family stages a
 // per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn), that
@@ -1835,8 +1836,54 @@ func restartPromptNudge(prompt, nudge string) string {
 // whose hooks prime once at SessionStart (pi, codex, antigravity, claude via
 // settings) are excluded by the family fact, not by SupportsHooks, which is
 // true for them as well.
-func resumeRolePromptSuppliedByHook(tp TemplateParams) bool {
-	return tp.HookEnabled && !tp.IsACP && tp.ResolvedProvider.HookSuppliesRolePerTurn()
+func rolePromptSuppliedByHook(tp TemplateParams) bool {
+	if !tp.HookEnabled || tp.IsACP || !tp.ResolvedProvider.HookSuppliesRolePerTurn() {
+		return false
+	}
+	// Only the local terminal runtimes are known to stage the provider overlay
+	// in the same filesystem where the CLI loads its plugin. Remote and custom
+	// runtimes keep the explicit role carrier rather than assuming hook presence.
+	switch tp.EffectiveSessionProvider {
+	case "", "tmux", "herdr":
+		return true
+	default:
+		return false
+	}
+}
+
+// hookStartupNudge supplies activation without persisting the hook-supplied
+// role as a user message. A beacon alone does not justify starting a turn.
+func hookStartupNudge(tp TemplateParams) string {
+	if strings.TrimSpace(tp.Hints.Nudge) == "" {
+		return ""
+	}
+	return restartPromptNudge(tp.Beacon, tp.Hints.Nudge)
+}
+
+const (
+	manualRoleKickoff    = "Confirm your role: reply with your role name and a one-sentence purpose, then wait for instructions."
+	automaticRoleKickoff = "Begin your startup routine as your instructions describe. If it finds no work for you, end your turn without a status report."
+)
+
+// hookFreshActivation starts a fresh conversation without resubmitting its role.
+// Explicit activation always wins; otherwise a manual session acknowledges its
+// role while automated sessions begin work instead of waiting for a backstop.
+func hookFreshActivation(tp TemplateParams, info sessionpkg.Info, message string) string {
+	nudge := hookStartupNudge(tp)
+	if message != "" {
+		return appendInitialMessageToStartupNudge(nudge, message)
+	}
+	if nudge != "" || strings.TrimSpace(tp.Prompt) == "" {
+		return nudge
+	}
+	kickoff := automaticRoleKickoff
+	switch {
+	case sessionOriginInfo(info) == "manual" || templateParamsSessionOrigin(tp) == "manual":
+		kickoff = manualRoleKickoff
+	case info.PoolManaged:
+		kickoff = defaultPoolClaimNudge
+	}
+	return restartPromptNudge(tp.Beacon, kickoff)
 }
 
 // resumeStartupNudge is the restart turn delivered to a resumed provider
@@ -1855,11 +1902,8 @@ func resumeRolePromptSuppliedByHook(tp TemplateParams) bool {
 // (nudgeStalledPoolClaims) starts a real turn. Both tmux and herdr skip an
 // empty nudge, so "" delivers nothing. The turn is never the template.
 func resumeStartupNudge(tp TemplateParams) string {
-	if resumeRolePromptSuppliedByHook(tp) {
-		if strings.TrimSpace(tp.Hints.Nudge) == "" {
-			return ""
-		}
-		return prependStartupPromptToNudge(tp.Beacon, tp.Hints.Nudge)
+	if rolePromptSuppliedByHook(tp) {
+		return hookStartupNudge(tp)
 	}
 	return restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
 }

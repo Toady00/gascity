@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Fresh hook-enabled OpenCode and MiMo Code CLI sessions no longer receive
+  the role template as a user message.** The plugin supplies it in the system
+  prompt on local tmux/Herdr runtimes. Configured startup nudges and initial
+  messages take precedence. With neither, manual sessions get a short role
+  confirmation request, pool workers get the existing claim instruction, and
+  other automated sessions get a short startup instruction. Resumes do not
+  repeat this kickoff. ACP, other runtimes, and `hooks_installed = false`
+  keep launch-time role delivery.
+- **`session = "tmux"` uses the city's actual runtime for prompt-delivery
+  checks.** It selects a terminal transport, not necessarily a local tmux
+  backend. Oversized launch prompts on SSH or custom runtimes without a
+  declared fallback now fail rather than assuming tmux nudge support.
 - **Keep Beads (`bd`) at v1.3.0.** v1.5.0 pins and is tested against bd
   v1.3.0 (`deps.env` `BD_VERSION` and the go.mod library). Do not move a city
   to a newer `bd` until a gc release pins it.
