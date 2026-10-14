@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -780,6 +781,7 @@ func TestHandoffNotInSessionContext(t *testing.T) {
 }
 
 func TestHandoffRemoteRunning(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	sp := runtime.NewFake()
@@ -788,8 +790,8 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
-		[]string{"Context refresh", "Check beads for current state"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, "deacon", "deacon", "mayor",
+		[]string{"Context refresh", "Check beads for current state"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -866,8 +868,8 @@ func TestHandoffRemoteNamedOnDemandSkipsKill(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "mayor", "mayor", "deacon",
-		[]string{"Context refresh", "Please pick this up manually"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "mayor", "mayor", "deacon",
+		[]string{"Context refresh", "Please pick this up manually"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -906,8 +908,8 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "human",
-		[]string{"Please check on PR #42"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "deacon", "deacon", "human",
+		[]string{"Please check on PR #42"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1181,7 +1183,7 @@ func handoffMailIDFromOutput(t *testing.T, out, marker string) string {
 var handoffMessagingForbidden = []string{
 	"doHandoffAuto(store,",
 	"doHandoffWithOutcome(store,",
-	"doHandoffRemote(store,",
+	"doHandoffRemoteWithForce(cityPath, store,",
 	"beadmail.NewWithStores(store,",
 }
 
@@ -1239,6 +1241,9 @@ func TestHandoffMessagingScanDetectsTheDefectItGuards(t *testing.T) {
 		// produce.
 		routed := strings.Replace(needle, "(store,", "(msgStore,", 1)
 		if routed == needle {
+			routed = strings.Replace(needle, ", store,", ", msgStore,", 1) // a store after the city path
+		}
+		if routed == needle {
 			t.Errorf("forbidden needle %q does not name a store argument, so it cannot be the unrouted spelling of anything", needle)
 			continue
 		}
@@ -1258,7 +1263,13 @@ func handoffCommandSource(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(currentFile), "cmd_handoff.go")
+	srcDir := ""
+	if root := bazeltest.OverrideRoot(); root != "" {
+		srcDir = filepath.Join(root, "cmd", "gc")
+	} else {
+		srcDir = filepath.Dir(currentFile)
+	}
+	path := filepath.Join(srcDir, "cmd_handoff.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", path, err)
