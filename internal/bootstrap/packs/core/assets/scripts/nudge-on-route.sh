@@ -10,8 +10,10 @@
 #
 # This order is exactly that workaround, shipped. It subscribes to
 # bead.updated events; whenever a bead carries a gc.routed_to target it
-# runs `gc session nudge <target> "<message>"`. Idempotent: a given
-# (bead, routed_to) pair is nudged at most once. Dedup state lives in
+# nudges that target — except a pool base with more than one active member,
+# which it defers to the controller's idle-claim backstop (see
+# nudge_routed_target). Idempotent: a given (bead, routed_to) pair is
+# handled at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -118,6 +120,8 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
+    # A deferred pool route also returns 0: the backstop owns its wake, so
+    # recording the pair as handled is intended.
     if nudge_routed_target "$routed_to"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
