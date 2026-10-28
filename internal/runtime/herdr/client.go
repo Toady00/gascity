@@ -276,11 +276,23 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. herdr 0.7.3 emits the name under
-// the JSON key "agent"; 0.9.1 moved it to "name" and reuses "agent" for the
-// agent kind ("claude", "codex"), which UnmarshalJSON resolves.
+// agentInfo mirrors herdr's agent object, which carries two different
+// identifiers. "name" is the registered agent name: the one `agent start
+// <name>` sets and `agent get <name>` resolves, and the only one gc session
+// identity may be matched against. "agent" is the agent kind herdr detected
+// in the pane (claude, opencode, pi, ...), shared by every pane running that
+// kind. Both fields have had these meanings since herdr's schema introduced
+// them (0.7.0; AgentInfo in src/api/schema/agents.rs, filled from
+// terminal.agent_name and the pane's detected agent), confirmed live on 0.9.1:
+// {"agent":"opencode","name":"mayor","pane_id":"wX:p1",...}.
+//
+// A detected agent with no registered name omits "name", so Name is empty.
+// Callers must treat that as unnamed and never substitute Kind: matching a
+// kind as a name resolves a session named after a kind to another session's
+// pane.
 type agentInfo struct {
-	Name        string `json:"agent"`
+	Name        string `json:"name"`
+	Kind        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -292,25 +304,6 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
-}
-
-// UnmarshalJSON prefers "name" over "agent": on herdr 0.9.1 decoding "agent"
-// keyed every pane by its kind, so all Claude sessions collapsed into one
-// activity entry and none could ever read as idle for nudge delivery.
-func (a *agentInfo) UnmarshalJSON(b []byte) error {
-	type plain agentInfo
-	var v struct {
-		plain
-		Label string `json:"name"`
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*a = agentInfo(v.plain)
-	if v.Label != "" {
-		a.Name = v.Label
-	}
-	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's
@@ -734,12 +727,14 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 
 // getAgent fetches one agent by target — an agent name or the pane id hosting
 // it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
-// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
-// get <target>` only resolves a pane id — passing an agent name returns
-// agent_not_found even though `agent list` lists that same agent under that
-// name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// absent, (_, false, err) on failure. A target that `agent get` rejects as
+// not-found falls back to a listAgents scan by registered name, so resolution
+// does not depend on `agent get` accepting a name. The scan matches Name only:
+// an agent kind is not a registered name, and an empty target matches nothing.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	if target == "" {
+		return agentInfo{}, false, nil
+	}
 	res, err := c.run(ctx, "agent", "get", target)
 	if err == nil {
 		var wrap struct {
