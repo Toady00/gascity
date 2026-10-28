@@ -53,7 +53,7 @@ case "$1" in
   ready)
     case "$*" in
       *"--metadata-field gc.routed_to=hello-world/worker"*)
-        printf '[{"id":"launch-root","status":"open","assignee":"","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"hello-world/worker"}}]'
+        printf '[{"id":"launch-root","status":"open","assignee":"","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"hello-world/worker","gc.native_step_dependencies.v1":"[]"}}]'
         ;;
       *)
         printf '[]'
@@ -84,7 +84,7 @@ case "$1" in
   ready)
     case "$*" in
       *"--metadata-field gc.routed_to=hello-world/worker"*)
-        printf '[{"id":"launch-root","status":"open","assignee":"","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"hello-world/worker"}},{"id":"ready-step","status":"open","assignee":"","metadata":{"gc.kind":"task","gc.root_bead_id":"launch-root","gc.routed_to":"hello-world/worker"}}]'
+        printf '[{"id":"launch-root","status":"open","assignee":"","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"hello-world/worker","gc.native_step_dependencies.v1":"[]"}},{"id":"ready-step","status":"open","assignee":"","metadata":{"gc.kind":"task","gc.root_bead_id":"launch-root","gc.routed_to":"hello-world/worker"}}]'
         ;;
       *)
         printf '[]'

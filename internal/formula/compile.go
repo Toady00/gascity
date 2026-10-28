@@ -681,13 +681,12 @@ func isDetachedGraphStep(step *Step) bool {
 // refuses to close a blocked issue and the finalizer is the only bead that
 // would ever clear the blocker (ga-a6zy9). Ordering does not need the edge —
 // the finalizer already blocks on every graph sink, so it cannot run early.
-// Without a blocking dep the root is Ready from the moment it is created, and
-// graph routing still stamps it with gc.routed_to, but a root with real child
-// steps is a latch, never dispatched work (beadmeta.WorkflowTopologyKinds):
-// molecule instantiation stamps it gc.workflow_expanded=true, and every worker
-// claim and demand reader excludes a root carrying that stamp whatever its
-// route. The edge is retained as "tracks" so the root still reaches its
-// finalizer through the dependency graph for cascade delete and
+// Without a blocking dependency the root is Ready from creation and carries
+// gc.routed_to (#2763), but a root with real children is a controller-owned
+// latch, never fresh worker work. Instantiation stamps gc.workflow_expanded;
+// newer metadata also records native dependencies so readers can distinguish
+// a root-only executable workflow from a graph latch. The edge remains
+// "tracks" so the root reaches its finalizer for cascade delete and
 // open-descendant traversal, both of which accept that type.
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {

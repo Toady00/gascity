@@ -208,6 +208,10 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+func jqTrimmedMeta(key string) string {
+	return `(` + jqMeta(key) + ` | tostring | gsub("^\\s+|\\s+$"; ""))`
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -231,6 +235,9 @@ type PoolDemandServeRules struct {
 	// holds, and bd's native human label, that a worker is deliberately
 	// forbidden to claim through.
 	ExcludeLabels []string
+	// ExcludeWorkflowTopology keeps graph-owned workflow/scope latches out of
+	// worker demand while preserving genuinely root-only workflow work.
+	ExcludeWorkflowTopology bool
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
@@ -245,11 +252,59 @@ type PoolDemandServeRules struct {
 // capacity demand, and the two cannot drift apart.
 func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
-		RequireUnassigned: true,
-		ExcludeTypes:      []string{"epic", "message"},
-		ExcludeLabels:     append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
+		RequireUnassigned:       true,
+		ExcludeTypes:            []string{"epic", "message"},
+		ExcludeLabels:           append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
+		ExcludeWorkflowTopology: true,
 	}
 }
+
+// AllowsMetadata reports whether metadata describes worker-executable work.
+// Modern workflow roots carry native-step topology: an empty dependency list
+// is root-only work, while any dependency makes the root a graph-owned latch.
+// Older routed graph roots without topology facts fail closed; legacy roots
+// without a routed identity retain their compatibility fallback.
+func (r PoolDemandServeRules) AllowsMetadata(metadata map[string]string) bool {
+	if !r.ExcludeWorkflowTopology {
+		return true
+	}
+	kind := strings.TrimSpace(metadata[beadmeta.KindMetadataKey])
+	if kind == beadmeta.KindScope || kind == beadmeta.KindSpec {
+		return false
+	}
+	if kind != beadmeta.KindWorkflow {
+		return true
+	}
+	if strings.TrimSpace(metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
+		return false
+	}
+	if nativeDeps, present := metadata[beadmeta.NativeStepDependenciesMetadataKey]; present {
+		return strings.TrimSpace(nativeDeps) == "[]"
+	}
+	return strings.TrimSpace(metadata[beadmeta.FormulaContractMetadataKey]) != beadmeta.FormulaContractGraphV2 ||
+		strings.TrimSpace(metadata[beadmeta.RoutedToMetadataKey]) == ""
+}
+
+func (r PoolDemandServeRules) metadataJQPredicate() string {
+	if !r.ExcludeWorkflowTopology {
+		return "true"
+	}
+	meta := ".metadata"
+	kind := jqTrimmedMeta(beadmeta.KindMetadataKey)
+	expanded := jqTrimmedMeta(beadmeta.WorkflowExpandedMetadataKey)
+	contract := jqTrimmedMeta(beadmeta.FormulaContractMetadataKey)
+	routedTo := jqTrimmedMeta(beadmeta.RoutedToMetadataKey)
+	nativeDeps := jqTrimmedMeta(beadmeta.NativeStepDependenciesMetadataKey)
+	hasNativeDeps := `((` + meta + ` // {}) | has("` + beadmeta.NativeStepDependenciesMetadataKey + `"))`
+	workflowExecutable := `(` + expanded + ` != "true") and ((` + hasNativeDeps + ` and (` + nativeDeps + ` == "[]")) or ((` + hasNativeDeps + ` | not) and ((` + contract + ` != "graph.v2") or (` + routedTo + ` == ""))))`
+	return `(` + kind + ` != "` + beadmeta.KindScope + `") and (` + kind + ` != "` + beadmeta.KindSpec + `") and ((` + kind + ` != "` + beadmeta.KindWorkflow + `") or (` + workflowExecutable + `))`
+}
+
+func poolDemandAdmissionJQ() string {
+	return `[.[] | select(` + PoolDemandServeRulesForQuery().metadataJQPredicate() + `)]`
+}
+
+const poolDemandCandidateLimit = 20
 
 // ShellArgs renders the rules as the bd flag string a routed pool-demand tier
 // carries. It is the single rendering path — every generated demand query, in
@@ -288,7 +343,7 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
+	filter := poolDemandAdmissionJQ() + ` | [.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -341,15 +396,18 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
-// every label the routed pool-demand tier refuses
-// (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// every excluded type, and, when excludeServeLabels is set, the exclusion of
+// every label the routed pool-demand tier refuses. Only the route-scoped tier
+// sets the label exclusion.
 // Dependency gating is layered on top by each caller, since `bd query --json`
 // exposes only a `dependency_count` scalar — never a `dependencies` array —
 // which is precise enough to prove "definitely no dependencies" but not to
 // resolve whether a nonzero count is still open.
 func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
-	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	body := selector
+	for _, excludedType := range PoolDemandServeRulesForQuery().ExcludeTypes {
+		body += ` | select(((.issue_type // .type // "") != ` + strconv.Quote(excludedType) + `))`
+	}
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
@@ -404,13 +462,18 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 // names it (executableWorkflowTopologyJQ) before the worker tier takes its
 // first row, so an older latch cannot displace a routed wisp step.
 func legacyEphemeralPoolDemandFilterJQ(limit int) string {
-	return legacyEphemeralReadyFilterJQ(
+	filter := legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`+
 			` | `+executableWorkflowTopologyJQ(),
-		limit,
+		0,
 		true,
 	)
+	filter += ` | ` + poolDemandAdmissionJQ()
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return filter
 }
 
 // legacyEphemeralPoolDemandShell assigns legacy_ephemeral_json the count-form's
@@ -463,12 +526,19 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`gc_pool_window="$r"; ` +
 		preferExecutablePoolDemandScript() +
+		`if [ "$(printf "%s\n%s\n" "$gc_pool_window" "$r" | jq -sr ` + shellquote.Quote(`.[0] as $raw | .[1] as $admitted | ($raw | length) >= `+strconv.Itoa(poolDemandCandidateLimit)+` and (($admitted | length) < ($raw | length))`) + ` 2>/dev/null)" = "true" ]; then ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		preferExecutablePoolDemandScript() + `fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit="+strconv.Itoa(poolDemandCandidateLimit), topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		`if [ "$r" = "[]" ] && [ "$(printf "%s" "$legacy_candidates" | jq -r 'length >= ` + strconv.Itoa(poolDemandCandidateLimit) + `' 2>/dev/null)" = "true" ]; then ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); fi; ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
+		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", poolDemandCandidateLimit, topo) +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -490,8 +560,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 // demand; the claim matcher still refuses any latch it carries.
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
-	preferJQ := `[.[] | ` + executableWorkflowTopologyJQ() + `]` +
-		` | [.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+	preferJQ := poolDemandAdmissionJQ() + ` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:` + strconv.Itoa(poolDemandCandidateLimit) + `]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
@@ -530,13 +599,13 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // TestPoolDemandCountFailsWhenTheEphemeralScanFails) — the same discipline
 // workQueryReadFailure gives the worker-side tiers.
 func poolDemandCountShell(target string, topo QueryTopology) string {
-	countFilter := `(add // []) | unique_by(.id) | map(` + executableWorkflowTopologyJQ() + `) | length`
+	countFilter := `(add // []) | ` + poolDemandAdmissionJQ() + ` | unique_by(.id) | length`
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		legacyEphemeralPoolDemandShell(0, topo) +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + shellquote.Join([]string{"jq", "-s", countFilter})
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s ` + shellquote.Quote(countFilter)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 
@@ -544,17 +613,7 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 // form. The topology vocabulary is shared; a never-expanded workflow root is
 // the compatibility exception because the root itself can be executable work.
 func executableWorkflowTopologyJQ() string {
-	kind := `(` + jqMeta(beadmeta.KindMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
-	expanded := `(` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
-	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds))
-	for _, topologyKind := range beadmeta.WorkflowTopologyKinds {
-		clause := fmt.Sprintf(`%s != %q`, kind, topologyKind)
-		if topologyKind == beadmeta.KindWorkflow {
-			clause = `(` + clause + ` or ` + expanded + ` != "true")`
-		}
-		clauses = append(clauses, clause)
-	}
-	return `select(` + strings.Join(clauses, ` and `) + `)`
+	return `select(` + PoolDemandServeRulesForQuery().metadataJQPredicate() + `)`
 }
 
 func (a *Agent) poolDemandTarget() string {
