@@ -452,7 +452,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		runHookSideEffects()
 	}
 
+	var fallbackAgent *config.Agent
 	for _, a := range resolvedAgents {
+		a := a
+		fallbackAgent = &a
 		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0, nil
 		}
@@ -514,8 +517,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// renders empty, or it has none and no builtin worker prompt fits it.
 	// Both are supported config shapes, so the default prompt is the correct
 	// output even under --strict.
+	fallbackPrompt := defaultPrimePrompt
+	if fallbackAgent != nil {
+		fallbackPrompt = appendPrimeHookSkillsAppendix(fallbackPrompt, cityPath, cityName, cfg, fallbackAgent, hookMode && !suppressHookPrompt)
+	}
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+	writePrimePromptWithFormat(stdout, cityName, agentName, fallbackPrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
 }
 

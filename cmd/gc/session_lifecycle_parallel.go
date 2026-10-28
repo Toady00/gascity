@@ -2201,6 +2201,27 @@ func restartPromptNudge(prompt, nudge string) string {
 	return prependStartupPromptToNudge(prompt, nudge)
 }
 
+// resumeRolePromptSuppliedByHook reports whether a resumed CLI session can
+// omit replaying its rendered startup prompt because its installed provider
+// hook supplies that prompt on each model generation. ACP never loads the CLI
+// plugin, and providers whose hooks only prime once at startup do not qualify.
+func resumeRolePromptSuppliedByHook(tp TemplateParams) bool {
+	return tp.HookEnabled && !tp.IsACP && tp.ResolvedProvider.HookSuppliesRolePerTurn()
+}
+
+// resumeStartupNudge avoids persisting the configured role prompt again when
+// the provider hook already supplies it. A configured nudge still accompanies
+// the wake beacon; without one, there is no restart message to send.
+func resumeStartupNudge(tp TemplateParams) string {
+	if resumeRolePromptSuppliedByHook(tp) {
+		if strings.TrimSpace(tp.Hints.Nudge) == "" {
+			return ""
+		}
+		return prependStartupPromptToNudge(tp.Beacon, tp.Hints.Nudge)
+	}
+	return restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+}
+
 // startupRateLimitScreenDetected reports whether the session's pane shows a
 // provider rate-limit screen. The peek is held to ctx: a peek that does not
 // answer in time is read as no screen.
