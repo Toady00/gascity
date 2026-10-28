@@ -192,33 +192,33 @@ esac
 	}
 }
 
-// TestNamedSessionOriginGatesAdmitOnlyCanonicalSingletons pins the demand gate:
-// ephemeral and controller probes always proceed; named sessions proceed only
-// when their agent is a canonical singleton. Manual aliases and multi-instance
-// pool holders stay gated. The graph-anchor path must still return a remembered
-// assigned workflow anchor before denying routed demand.
-func TestNamedSessionOriginGatesAdmitOnlyCanonicalSingletons(t *testing.T) {
-	one := 1
-	four := 4
-	singleton := &Agent{Name: "worker", MaxActiveSessions: &one}
-	pool := &Agent{Name: "worker", MaxActiveSessions: &four}
-	plainSingleton := poolDemandOriginGateScript(singleton)
-	plainPool := poolDemandOriginGateScript(pool)
-	anchor := poolDemandOriginGateScriptWithGraphAnchorFallback(singleton)
+// TestNamedSessionOriginGatesAdmitOnlySelfTarget is the per-clause mutation pin on
+// the generated gate strings themselves. Both origin gates must:
+//   - keep the ephemeral / no-origin arm a plain fall-through (pool seats and the
+//     reconciler's session-less demand detection are unchanged), and
+//   - admit a non-ephemeral session's routed tier only when both the alias is set
+//     and the probe target equals it ([ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]).
+//
+// The graph-anchor variant must additionally still emit a remembered assigned
+// workflow anchor on the GATED path so a named holder's launch anchor is not
+// dropped when it is not probing self-routed demand.
+func TestNamedSessionOriginGatesAdmitOnlySelfTarget(t *testing.T) {
+	a := &Agent{Name: "worker"}
+	plain := poolDemandOriginGateScript(a)
+	anchor := poolDemandOriginGateScriptWithGraphAnchorFallback(a)
+	const admit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
+	const unchangedArm = `case "$GC_SESSION_ORIGIN" in ephemeral|"") ;; `
 
-	for name, gate := range map[string]string{"singleton": plainSingleton, "pool": plainPool, "graph-anchor": anchor} {
-		if !strings.HasPrefix(gate, `case "$GC_SESSION_ORIGIN" in ephemeral|"") ;; `) {
-			t.Fatalf("%s gate changed the ephemeral/no-origin fall-through arm: %q", name, gate)
+	for name, gate := range map[string]string{"plain": plain, "graph-anchor": anchor} {
+		if !strings.Contains(gate, admit) {
+			t.Fatalf("%s origin gate lost the self-target admit clause %q: %q", name, admit, gate)
+		}
+		if !strings.HasPrefix(gate, unchangedArm) {
+			t.Fatalf("%s origin gate changed the ephemeral/no-origin fall-through arm: %q", name, gate)
 		}
 	}
-	if !strings.Contains(plainSingleton, `ephemeral|named|"")`) {
-		t.Fatalf("canonical singleton gate does not admit named sessions: %q", plainSingleton)
-	}
-	if strings.Contains(plainPool, `ephemeral|named|"")`) {
-		t.Fatalf("multi-instance pool gate admits named sessions: %q", plainPool)
-	}
 	if !strings.Contains(anchor, "gc_assigned_workflow_anchor_json") {
-		t.Fatalf("graph-anchor gate dropped the assigned-anchor fallback on the gated path: %q", anchor)
+		t.Fatalf("graph-anchor origin gate dropped the assigned-anchor fallback on the gated path: %q", anchor)
 	}
 }
 
