@@ -510,6 +510,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			// candidate, then the default fallback.
 			continue
 		}
+		rendered.Text = appendPrimeHookSkillsAppendix(rendered.Text, cityPath, cityName, cfg, &a, hookMode && !suppressHookPrompt)
 		var budget *promptBudgetJSON
 		if strictMode && a.PromptTemplate != "" {
 			var budgetErr error

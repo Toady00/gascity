@@ -1409,7 +1409,7 @@ func buildPreparedStartWithTranscript(
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		agentCfg.Nudge = resumeStartupNudge(tp)
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
 		}
