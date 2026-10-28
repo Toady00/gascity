@@ -1908,6 +1908,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"appendVolatileSystem",
 		"const turns = new Map()",
 		"state.userMessageIDs.has(messageID)",
+		"Promise.all([",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1941,6 +1942,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"appendVolatileSystem",
 		"const turns = new Map()",
 		"state.userMessageIDs.has(messageID)",
+		"Promise.all([",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
 		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
@@ -2376,6 +2378,7 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+Promise.all([]);
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
@@ -2384,6 +2387,7 @@ if (state.userMessageIDs.has(messageID)) {}
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
+	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2408,6 +2412,9 @@ if (state.userMessageIDs.has(messageID)) {}
 	}
 	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(serialInjection) {
+		t.Fatal("OpenCode hook without concurrent optional injection did not request upgrade")
 	}
 }
 

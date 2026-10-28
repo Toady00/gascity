@@ -403,7 +403,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// A turn opens on a user-message id the session has not seen, not
 		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
 		// an id-order gate stops opening turns (#6629).
-		!strings.Contains(content, "state.userMessageIDs.has(messageID)") {
+		!strings.Contains(content, "state.userMessageIDs.has(messageID)") ||
+		// Optional injections run concurrently to avoid serial command latency.
+		!strings.Contains(content, "Promise.all([") {
 		return true
 	}
 	for _, marker := range []string{

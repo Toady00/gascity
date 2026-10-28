@@ -207,8 +207,10 @@ export default async function gascityPlugin({ directory, client }) {
   // `Current time: ...` line on every call even with an empty queue, and
   // unread mail changes as it arrives. Neither may sit ahead of stable text.
   async function readVolatile() {
-    const nudges = await run(directory, "nudge", "drain", "--inject");
-    const mail = await run(directory, "mail", "check", "--inject");
+    const [nudges, mail] = await Promise.all([
+      run(directory, "nudge", "drain", "--inject"),
+      run(directory, "mail", "check", "--inject"),
+    ]);
     return [nudges, mail].filter(Boolean).join("\n\n");
   }
 
