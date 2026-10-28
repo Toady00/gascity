@@ -1006,49 +1006,28 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
-// namedSelfTargetAdmit is the origin-gate condition that lets a non-ephemeral
-// session continue to the routed (pool-demand) tier instead of short-circuiting.
-// It is true only when the session carries a claim alias (GC_ALIAS) and the probe
-// target ($1) is exactly that alias.
-//
-// The identities line up by construction: poolDemandTarget() (baked in as $1),
-// RoutedToIdentity() (the claim-match primary route target the hook checks), and
-// GC_ALIAS all resolve to the same raw QualifiedName() for a plain named session
-// (cfg.NamedSessions[i].QualifiedName() flows into GC_ALIAS alongside
-// GC_SESSION_ORIGIN=named). So admitting on this condition surfaces exactly the
-// work the session itself can claim — routed_to=<self>, assignee="" — and nothing
-// routed elsewhere. A named+pool hybrid probes its PoolName, which is != GC_ALIAS,
-// so it stays gated and cannot over-claim its pool's routed work; an empty alias
-// fails closed.
-//
-// Beyond the ephemeral|"" fall-through arm the condition deliberately ignores the
-// origin value: admission is keyed on claim identity, not on origin. Any
-// non-ephemeral session whose GC_ALIAS equals its probe target is admitted,
-// including a manual session an operator deliberately aliased as the queue
-// identity (`gc session new <agent> --alias <that identity>` forces
-// origin=manual). That is the same identity coincidence proved above, so the
-// admitted work stays exactly the work the claim path already accepts. It is NOT
-// a general widening to manual sessions: an unaliased one carries GC_ALIAS="" and
-// fails closed on the first test.
-const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
-
-// poolDemandOriginGateScript emits the plain origin gate. It is valid only at
-// `sh -c` script top level, where $1 is the probe target baked in after `--`.
-func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) ` + namedSelfTargetAdmit + ` || exit 0 ;; ` +
-		`esac; `
+// poolDemandOriginGateScript gates routed pool demand on the session origin.
+// Ephemeral pool members and controller probes (empty origin) always consume
+// routed demand. Named sessions are admitted only for canonical singletons:
+// those holders are the sessions the controller wakes for their routed work,
+// while a multi-instance pool has a standby to serve it.
+func poolDemandOriginGateScript(a *Agent) string {
+	admitted := `ephemeral|""`
+	if a.UsesCanonicalSingletonPoolIdentity() {
+		admitted = `ephemeral|named|""`
+	}
+	return `case "$GC_SESSION_ORIGIN" in ` + admitted + `) ;; *) exit 0 ;; esac; `
 }
 
-// poolDemandOriginGateScriptWithGraphAnchorFallback emits the origin gate used by
-// the combined work query, which flushes a remembered assigned workflow anchor
-// before short-circuiting. Like the plain gate it is valid only at `sh -c` script
-// top level, where $1 is the probe target baked in after `--`.
-func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) ` + namedSelfTargetAdmit + ` || { [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; } ;; ` +
+// poolDemandOriginGateScriptWithGraphAnchorFallback also returns a remembered
+// assigned workflow anchor before denying a session's routed-demand probe.
+func poolDemandOriginGateScriptWithGraphAnchorFallback(a *Agent) string {
+	admitted := `ephemeral|""`
+	if a.UsesCanonicalSingletonPoolIdentity() {
+		admitted = `ephemeral|named|""`
+	}
+	return `case "$GC_SESSION_ORIGIN" in ` + admitted + `) ;; ` +
+		`*) { [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; } ;; ` +
 		`esac; `
 }
 
@@ -1075,16 +1054,16 @@ func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
 		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
 
-func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
+func routedPoolWorkQueryProbeScript(a *Agent, topo QueryTopology, targetCount int) string {
+	script := poolDemandOriginGateScript(a) + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
+func routedPoolWorkQueryCommand(a *Agent, topo QueryTopology, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(a, topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -1193,7 +1172,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScriptWithGraphAnchorFallback() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 			// Define the ordinary pool reader before the narrower anchor reader.
 			// Besides keeping the generated tiers easy to identify mechanically,
 			// function definition order does not change their invocation order:
@@ -1207,7 +1186,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScriptWithGraphAnchorFallback() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback(a) +
 		poolDemandFirstRowFunctionScript(topo) +
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
@@ -1283,9 +1262,9 @@ func buildRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(a, topo, target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(a, topo, target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
