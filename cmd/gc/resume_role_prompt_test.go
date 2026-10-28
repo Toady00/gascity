@@ -220,7 +220,7 @@ func prepareRoleStart(t *testing.T, tp TemplateParams, metadata map[string]strin
 // their initial message without persisting a second copy of the role either.
 func TestResumeOnHookPrimedProviderNeverReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	// No install_agent_hooks: this is the default opencode configuration, and
@@ -335,7 +335,7 @@ func TestFreshHookPrimedStartActivation(t *testing.T) {
 
 func TestFreshHookPrimedStartRecovery(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 	for _, mode := range []string{"missing-key", "stale-key", "fresh"} {
 		t.Run(mode, func(t *testing.T) {
@@ -426,7 +426,7 @@ func TestFreshHookPrimedAutomaticKickoff(t *testing.T) {
 
 func TestFreshHookPrimedForceFreshWithValidKey(t *testing.T) {
 	prev := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prev })
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
 	prepared := prepareRoleStart(t, tp, map[string]string{
@@ -471,7 +471,7 @@ func TestFreshHookPrimedEmptyRoleDoesNotKickoff(t *testing.T) {
 // message, queued nudge, or reconcile-tick claim backstop starts a real turn.
 func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	tp := resolveResumeRoleTemplateWithNudge(t, "opencode", builtinProviderAliasesForTest("opencode"), nil, config.SessionTransportTmux, nil, "")
@@ -501,7 +501,7 @@ func TestResumeOnHookPrimedProviderWithBlankNudgeLandsIdle(t *testing.T) {
 // SessionStart (pi) keeps the restart prompt in its resume nudge.
 func TestResumeWithoutPerTurnRoleHookStillReplaysRolePrompt(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	no := false

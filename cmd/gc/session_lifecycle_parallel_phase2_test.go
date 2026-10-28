@@ -83,7 +83,7 @@ func TestPhase2HookInstalledResumeInputDelivery(t *testing.T) {
 	reporter := newPhase2Reporter(t, "phase2-input-delivery-hook-installed")
 
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	for _, tc := range selectedPhase2ProviderCases(t) {
@@ -145,7 +145,7 @@ func TestPhase2DefaultConfigurationHookPrimedResume(t *testing.T) {
 	reporter := newPhase2Reporter(t, "phase2-input-delivery-default-hook-primed")
 
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	for _, tc := range selectedPhase2ProviderCases(t) {
