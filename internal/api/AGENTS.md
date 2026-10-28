@@ -79,6 +79,9 @@ a sanctioned bypass of the worker boundary. Do not add others; see
   diff tests that fail when the committed `dist/`, generated API client, or
   `pnpm-lock.yaml` is stale (`make dashboard-build`,
   `make dashboard-generate-client`, `make dashboard-lock` fix them)
+- `make dashboard-build` is Bazel-backed (`//internal/api/dashboardspa:dist`),
+  not an npm-only build. On a host where Bazel cannot run, it cannot refresh
+  committed `dist/`; the npm-backed target is `make dashboard-build-npm`.
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes (a manual step, not a CI gate); use
   `npm run preview -- --host 127.0.0.1 --port <port>` from
