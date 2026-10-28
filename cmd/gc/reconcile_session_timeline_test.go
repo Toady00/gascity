@@ -569,6 +569,13 @@ const timelineGoldenBaseline = "O7 baseline: legacy at 72115d84b4 (TL)"
 // every FingerprintExtra key.
 const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves the stored hash prefix only (owner ruling 2026-10-18; also mc-lmixa)"
 
+// timelineIntegrationBreakdownKeys admits, on the local integration branch
+// only, the two core_hash_breakdown keys (OperatorEnv, Upstream) that the
+// unmerged gastownhall/gascity#6626 adds to legacy's recorded breakdown.
+// The bead id is a placeholder that satisfies the ruling form; drop these
+// entries when #6626 lands upstream with its own ruling.
+const timelineIntegrationBreakdownKeys = "fix #6626 (mc-integration): core_hash_breakdown gains OperatorEnv and Upstream (integration-only)"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
@@ -634,6 +641,22 @@ var timelineGoldenRulings = []goldenRuling{
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
 	{"suspend, then wake", "fix #7417 (mc-esqo7)", "ff88e0c7b075"},
 	{"suspend, then wake", timelineFingerprintV7, "fc327803a54e"},
+	{"a crash 29s after wake", timelineIntegrationBreakdownKeys, "9e7c44eae55b"},
+	{"a crash 5m0s after wake", timelineIntegrationBreakdownKeys, "bd9a71ce9dfb"},
+	{"a cutover finds v5 hashes on a live seat", timelineIntegrationBreakdownKeys, "9ddf7206d46a"},
+	{"a live drift on a seat", timelineIntegrationBreakdownKeys, "c86f85a8a741"},
+	{"a managed suspend drains, then wake", timelineIntegrationBreakdownKeys, "e0521e1a8370"},
+	{"a manual conversation crashes 29s after wake", timelineIntegrationBreakdownKeys, "adcc8a5e2600"},
+	{"a manual conversation crashes 31s after wake", timelineIntegrationBreakdownKeys, "aeec3465267c"},
+	{"a manual create read between its two writes", timelineIntegrationBreakdownKeys, "adefef03a000"},
+	{"a provider swap stops the runtime", timelineIntegrationBreakdownKeys, "d8d5adf975d3"},
+	{"a quarantine, then a kill fence, expires", timelineIntegrationBreakdownKeys, "ae23110595ad"},
+	{"a waiter sleeps", timelineIntegrationBreakdownKeys, "ca407285c43d"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineIntegrationBreakdownKeys, "e62963c2733e"},
+	{"drift deferrals through time", timelineIntegrationBreakdownKeys, "b89fd57ee068"},
+	{"idle, then sleep, then the next pass", timelineIntegrationBreakdownKeys, "a7fd7237c22d"},
+	{"kill a seat holding a ready claim", timelineIntegrationBreakdownKeys, "ce84065e8e36"},
+	{"suspend, then wake", timelineIntegrationBreakdownKeys, "e6985f8163fe"},
 }
 
 func goldenDigest(section string) string {
