@@ -551,6 +551,28 @@ func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []st
 	return candidates
 }
 
+// appendPrimeHookSkillsAppendix adds the same skills appendix used by the
+// launch path when the hook copy carries the role and the runtime can deliver
+// those skills to the session workdir. Explicit `gc prime` remains unchanged.
+func appendPrimeHookSkillsAppendix(prompt, cityPath, cityName string, cfg *config.City, a *config.Agent, hookCopyCarriesRole bool) string {
+	if !hookCopyCarriesRole || cfg == nil || a == nil {
+		return prompt
+	}
+	workDir := strings.TrimSpace(os.Getenv("GC_DIR"))
+	if workDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return prompt
+		}
+		workDir = cwd
+	}
+	params := newAgentBuildParams(cityName, cityPath, cfg, nil, time.Now(), nil, io.Discard)
+	if fragment := assignedSkillsPromptAppendix(params, a, workDir); fragment != "" {
+		return prompt + "\n\n" + fragment
+	}
+	return prompt
+}
+
 func primeHookSessionTemplate(cityPath string) string {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if cityPath == "" || sessionID == "" {
