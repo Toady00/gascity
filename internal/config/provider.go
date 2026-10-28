@@ -337,7 +337,7 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 // Whether that hook is actually installed for a given agent is a separate
 // question answered by AgentHasHooks; a wrapped provider whose overridden
 // command does not load the staged plugin directory should set
-// hooks_installed = false to keep the resume replay.
+// hooks_installed = false to keep explicit launch-time role delivery.
 func (rp *ResolvedProvider) HookSuppliesRolePerTurn() bool {
 	if rp == nil {
 		return false

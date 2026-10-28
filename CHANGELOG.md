@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Fresh hook-enabled OpenCode and MiMo Code CLI sessions no longer receive
+  the role template as a user message.** On local tmux/Herdr runtimes, the
+  provider plugin supplies it in the system prompt. Configured startup nudges
+  and initial messages take precedence; otherwise manual sessions receive a
+  brief role confirmation, pool workers receive the existing claim instruction,
+  and other automated sessions receive a short startup instruction. Resumes do
+  not replay the role. ACP, other runtimes, and `hooks_installed = false` retain
+  launch-time role delivery.
+- **`session = "tmux"` prompt-delivery checks use the resolved runtime.** This
+  setting selects a terminal transport, not necessarily a local tmux backend.
+  Oversized launch prompts on SSH or custom runtimes without a declared
+  fallback now fail instead of assuming tmux nudge support.
+
 - **The op journal now records session requests by default on a SQLite
   sessions store.** The three `[ops]` rollout gates, `content` (submit,
   messages, nudge, mail notify), `control` (interrupt, respond) and

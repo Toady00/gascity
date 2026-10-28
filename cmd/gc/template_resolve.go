@@ -862,9 +862,8 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
-// needed by Provider.Start. When it materializes the rendered prompt into the
-// launch or nudge path, it marks the runtime env so SessionStart hooks can add
-// context without repeating the full startup prompt.
+// needed by Provider.Start. It selects the role carrier independently of the
+// activation nudge and records that selection in the runtime environment.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	cfg, _, _ := templateParamsToConfigWithDelivery(tp)
 	return cfg
@@ -885,11 +884,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // caller must not construct a runtime.Config or call Provider.Start in that
 // case (gastownhall/gascity ga-q8wgom.1.1).
 func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
-	// SessionStart hooks can enrich context, but the startup prompt still needs
-	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
-	// spawned workers sit idle at the provider prompt. The routing policy lives
-	// in the pure promptDelivery derivation.
-	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
+	delivery, err := templatePromptDelivery(tp)
 	configuredMode := "arg"
 	switch {
 	case tp.IsACP:
@@ -951,6 +946,19 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
 	return cfg, delivery, nil
+}
+
+// templatePromptDelivery selects the per-generation hook as the role carrier
+// where supported. Other providers retain launch-time prompt delivery. Role
+// bytes carried by the hook never enter argv and need no argv-size fallback.
+func templatePromptDelivery(tp TemplateParams) (promptDeliveryResult, error) {
+	if rolePromptSuppliedByHook(tp) {
+		return promptDeliveryResult{
+			Nudge:     hookStartupNudge(tp),
+			Delivered: strings.TrimSpace(tp.Prompt) != "",
+		}, nil
+	}
+	return promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record
