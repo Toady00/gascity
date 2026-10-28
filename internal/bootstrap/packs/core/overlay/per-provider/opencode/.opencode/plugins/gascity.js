@@ -116,6 +116,12 @@ function safeSessionID(sessionID) {
   return String(sessionID || "").replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
+function managedSessionIdentityPresent() {
+  return ["GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT", "GC_TEMPLATE"].some(
+    (key) => String(process.env[key] || "").trim() !== "",
+  );
+}
+
 function sessionIDFromEvent(event) {
   return (
     event?.properties?.sessionID ||
@@ -163,6 +169,9 @@ async function mirrorTranscript(directory, client, sessionID) {
 }
 
 export default async function gascityPlugin({ directory, client }) {
+  if (!managedSessionIdentityPresent()) {
+    return {};
+  }
   let cachedPrime = null;
 
   // experimental.chat.system.transform fires once per model generation, not

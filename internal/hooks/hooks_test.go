@@ -1909,6 +1909,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"const turns = new Map()",
 		"state.userMessageIDs.has(messageID)",
 		"Promise.all([",
+		"managedSessionIdentityPresent()",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1942,6 +1943,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"appendVolatileSystem",
 		"const turns = new Map()",
 		"state.userMessageIDs.has(messageID)",
+		"managedSessionIdentityPresent()",
 		"Promise.all([",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
@@ -2379,6 +2381,7 @@ function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
 Promise.all([]);
+managedSessionIdentityPresent();
 `)
 	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
 	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
@@ -2388,6 +2391,7 @@ Promise.all([]);
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 	serialInjection := bytes.Replace(current, []byte("Promise.all([]);\n"), nil, 1)
+	unguarded := bytes.ReplaceAll(current, []byte("managedSessionIdentityPresent();\n"), nil)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2415,6 +2419,9 @@ Promise.all([]);
 	}
 	if !opencodeHookNeedsUpgrade(serialInjection) {
 		t.Fatal("OpenCode hook without concurrent optional injection did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(unguarded) {
+		t.Fatal("OpenCode hook without the unmanaged-session guard did not request upgrade")
 	}
 }
 

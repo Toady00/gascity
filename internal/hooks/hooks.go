@@ -506,7 +506,9 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// an id-order gate stops opening turns (#6629).
 		!hookContains(content, "state.userMessageIDs.has(messageID)") ||
 		// Optional injections run concurrently to avoid serial command latency.
-		!hookContains(content, "Promise.all([") {
+		!hookContains(content, "Promise.all([") ||
+		// Human-launched OpenCode sessions must not run gc lifecycle hooks.
+		!hookContains(content, "managedSessionIdentityPresent()") {
 		return true
 	}
 	for _, marker := range []string{

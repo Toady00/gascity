@@ -11,9 +11,11 @@
 // reads its hook input to EOF and then emits `Current time: ...` even when
 // the queue is empty.
 
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it, test } from "node:test";
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -157,12 +159,65 @@ function countOccurrences(haystack, needle) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gc-plugin-test-"));
 const fake = writeFakeGc(tmp);
 process.env.GC_BIN = fake.bin;
+process.env.GC_SESSION_ID = "managed-test-session";
 // Both plugins mirror session transcripts through the client, and MiMo Code
 // mirrors by default into the user's Gas City data directory, so keep every
 // mirror under the suite's temp dir.
 const transcriptDir = path.join(tmp, "transcripts");
 process.env.GC_OPENCODE_TRANSCRIPT_DIR = transcriptDir;
 process.env.GC_MIMOCODE_TRANSCRIPT_DIR = transcriptDir;
+
+test("OpenCode factory is silent without managed identity", async () => {
+  const source = fs.readFileSync(plugins[0].source, "utf8");
+  const savedEnv = process.env;
+  const savedStdout = process.stdout.write;
+  const savedStderr = process.stderr.write;
+  const savedCommands = {};
+  const calls = [];
+  const stdout = [];
+  const stderr = [];
+  try {
+    for (const name of ["exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync", "fork"]) {
+      savedCommands[name] = childProcess[name];
+      childProcess[name] = (...args) => {
+        calls.push({ name, args });
+        throw new Error("unexpected subprocess call");
+      };
+    }
+    syncBuiltinESMExports();
+    process.env = {};
+    const { default: factory } = await import(
+      `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+    );
+    process.stdout.write = (chunk) => { stdout.push(String(chunk)); return true; };
+    process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true; };
+    const identityKeys = ["GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT", "GC_TEMPLATE"];
+    for (const env of [{}, Object.fromEntries(identityKeys.map((key) => [key, ""])), Object.fromEntries(identityKeys.map((key) => [key, " \t\n"]))]) {
+      process.env = env;
+      for (let i = 0; i < 3; i++) {
+        assert.deepEqual(await factory({ directory: "/unused", client: {} }), {});
+      }
+    }
+    assert.deepEqual(calls, [], "unmanaged factories must not launch subprocesses");
+    assert.deepEqual(stdout, [], "unmanaged factories must not write stdout");
+    assert.deepEqual(stderr, [], "unmanaged factories must not write stderr");
+
+    for (const key of identityKeys) {
+      process.env = { [key]: "managed-test-session" };
+      const hooks = await factory({ directory: "/unused", client: {} });
+      assert.deepEqual(Object.keys(hooks).sort(), [
+        "event", "experimental.chat.system.transform", "experimental.session.compacting",
+      ]);
+      for (const hook of Object.values(hooks)) assert.equal(typeof hook, "function");
+    }
+  } finally {
+    process.env = savedEnv;
+    process.stdout.write = savedStdout;
+    process.stderr.write = savedStderr;
+    Object.assign(childProcess, savedCommands);
+    syncBuiltinESMExports();
+  }
+});
 
 after(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
