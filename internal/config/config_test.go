@@ -2132,7 +2132,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2144,7 +2144,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "ready --assignee=worker-session --exclude-type=message --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2156,7 +2156,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-type=message --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2269,12 +2269,12 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "ready --assignee=gascity/control-dispatcher --json --limit=1")
+  "ready --assignee=gascity--control-dispatcher --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/control-dispatcher --exclude-type=message --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-type=message --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2404,8 +2404,8 @@ case "$*" in
   "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-type=message --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-type=message --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2458,7 +2458,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-type=message --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
     printf '[{"id":"served-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -2507,7 +2507,7 @@ func TestEffectiveWorkQueryRoutedQueueRidesReaderPriorityOrder(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-type=message --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
     printf '[{"id":"newer-p0","priority":0,"created_at":"2026-05-21T06:09:30Z"},{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
   *)

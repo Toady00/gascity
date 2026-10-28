@@ -1943,7 +1943,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"appendVolatileSystem",
 		"const turns = new Map()",
 		"state.userMessageIDs.has(messageID)",
-		"managedSessionIdentityPresent()",
 		"Promise.all([",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
