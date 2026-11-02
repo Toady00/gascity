@@ -422,12 +422,12 @@ func TestSessionSubmitAndMessageRejectPendingInteractionWith409(t *testing.T) {
 	}
 }
 
-// TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending: the #2892 guard
-// refuses only a prompt it sees. A session that is not running has no prompt
-// to answer, so a submit or message to it is accepted (202) without looking,
-// even when its runtime cannot be reached. A look that cannot reach a running
-// session's runtime refuses nothing either: the delivery looks again under the
-// session lock. Kills an undeclared 500 from the accept-path look.
+// TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending: a session that
+// is not running has no prompt to answer, so a submit or message to it is
+// accepted (202) without looking, even when its runtime cannot be reached.
+// (A running session's look that cannot answer refuses the text:
+// TestSessionSubmitAndMessageRefuseALookThatCannotAnswer.) Kills an
+// undeclared 500 from the accept-path look.
 func TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending(t *testing.T) {
 	unreachable := fmt.Errorf("capturing pane: tmux server unreachable: %w", runtime.ErrRuntimeUnavailable)
 	for _, row := range []struct {
@@ -437,7 +437,6 @@ func TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending(t *testing.T) {
 	}{
 		{name: "suspended, runtime unreachable", suspended: true, lookErr: unreachable},
 		{name: "suspended, look fails", suspended: true, lookErr: errors.New("capturing pane: exit status 1")},
-		{name: "running, runtime unreachable", lookErr: unreachable},
 	} {
 		for _, tc := range []struct{ path, body string }{
 			{"/submit", `{"message":"hello?"}`},
@@ -586,6 +585,47 @@ func TestHandleSessionSubmitWithoutResumeLeavesStartToController(t *testing.T) {
 				t.Fatalf("enqueued = %v on a row held=%v", enqueued, tc.held)
 			}
 		})
+	}
+}
+
+// skippedStateWillStartState is a controller that skips the row's state:
+// its will-not-start predicate refuses with the skip reason first, as the
+// controller's does, and it names the same reason for the state it skips.
+type skippedStateWillStartState struct {
+	*fakeState
+	refusal string
+}
+
+func (s *skippedStateWillStartState) WakeStartRefusal(session.Info) (string, bool) {
+	return s.refusal, true
+}
+
+func (s *skippedStateWillStartState) UnknownStateRefusal(session.Info) string {
+	return s.refusal
+}
+
+// TestHandleSessionSubmitToASkippedStateNamesOnlyTheClose: a message queued
+// without resume: true to a row whose state the controller skips (a padded
+// asleep, which the wake request reads as dormant) answers will_start false
+// with the skip reason alone. Resume does not change the row's state, so the
+// resume hint the other will-not-start reasons carry would contradict the
+// close the reason names. Kills a deferral that tells the caller to resend
+// with resume: true for a row only a close releases.
+func TestHandleSessionSubmitToASkippedStateNamesOnlyTheClose(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Padded")
+	refusal := "its state \" asleep\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"
+	state := &skippedStateWillStartState{fakeState: fs, refusal: refusal}
+	h := newTestCityHandlerWith(t, state, New(state))
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": " asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
+		t.Fatal(err)
+	}
+	success := submitWithoutResume(t, fs, h, info.ID, `{"message":"hello"}`)
+	if !success.Queued || success.WillStart == nil || *success.WillStart || success.WillNotStartReason != refusal {
+		t.Fatalf("queued = %v, will_start = %v, reason %q; want queued, will_start false and the skip reason alone", success.Queued, success.WillStart, success.WillNotStartReason)
 	}
 }
 

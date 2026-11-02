@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -176,7 +177,15 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				query.SeekAfter = seek
 			}
 			pa.attempt()
-			list, err := leg.store.List(query)
+			// One leg of the /beads fan-out (work legs, then the class
+			// binding): each lists only its own rows, so a type or label the
+			// other legs own misses here by design.
+			var list []beads.Bead
+			err := beads.FederatedRead(func() error {
+				var listErr error
+				list, listErr = leg.store.List(query)
+				return listErr
+			})
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
@@ -564,9 +573,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
-	var all []beads.Bead
 	var pa partialAggregator
-	seen := make(map[string]bool)
+	// Each leg's rows are kept by leg so a split city can pass them through the
+	// cross-store rule before they merge (below).
+	type readyLeg struct {
+		leg  readywork.Leg
+		rows []beads.Bead
+	}
+	var legs []readyLeg
 	federate := func(label string, store beads.Store) {
 		if store == nil {
 			return
@@ -584,16 +598,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		} else {
 			pa.success()
 		}
-		for _, b := range ready {
-			if seen[b.ID] {
-				// An id is one bead: legacy file mode can alias the city and rig
-				// stores, and a migrated split city holds the same infrastructure
-				// row in both the work store and the binding.
-				continue
-			}
-			seen[b.ID] = true
-			all = append(all, b)
-		}
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
@@ -622,18 +627,50 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		for _, b := range ready {
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
+	}
+	// On a split city every leg's rows pass through the same cross-store rule
+	// `gc ready` and pool demand apply (readywork.LegGate): a row a blocker
+	// held in another store still holds is not served, and a row a store
+	// strands behind a blocker that has closed elsewhere is. One gate judges
+	// every leg, so a blocker several legs' rows wait on is read once. A city
+	// with no binding keeps every store's own answer.
+	federated := make([]readywork.Leg, len(legs))
+	for i, l := range legs {
+		federated[i] = l.leg
+	}
+	if readywork.IsSplit(federated) {
+		gate := readywork.NewLegGate(federated, readyFederationQuery())
+		for i := range legs {
+			gated, err := gate.Gate(ctx, i, legs[i].rows)
+			if err != nil {
+				// A leg whose blockers could not be judged serves nothing: an
+				// ungated row may be one a blocker still holds. The response
+				// says it is short, as it does for a leg that failed to read.
+				pa.record(legs[i].leg.Label, fmt.Errorf("cross-store blockers: %w", err))
+				legs[i].rows = nil
+				continue
+			}
+			legs[i].rows = gated
+		}
+	}
+	var all []beads.Bead
+	seen := make(map[string]bool)
+	for _, l := range legs {
+		for _, b := range l.rows {
 			if seen[b.ID] {
+				// An id is one bead: legacy file mode can alias the city and rig
+				// stores, and a migrated split city holds the same infrastructure
+				// row in both the work store and the binding.
 				continue
 			}
 			seen[b.ID] = true
 			all = append(all, b)
 		}
 	}
-	if pa.totalOutage() {
-		return nil, pa.outageError()
-	}
-
 	if all == nil {
 		all = []beads.Bead{}
 	}
@@ -768,6 +805,16 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			// review).
 			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
 				return beads.Bead{}, err
+			}
+			// Record who made a write-auth-verified request. Cloned so the
+			// request body, which the idempotency digest covers, is never
+			// mutated.
+			if kid, ok := VerifiedPrincipal(ctx); ok {
+				candidate.Metadata = maps.Clone(candidate.Metadata)
+				if candidate.Metadata == nil {
+					candidate.Metadata = make(map[string]string, 1)
+				}
+				candidate.Metadata[beadmeta.InitiatorMetadataKey] = kid
 			}
 			// The store follows from the bead, not from the request: an
 			// infrastructure-class body belongs in this city's class binding
@@ -1119,8 +1166,11 @@ func ownerOf(b beads.Bead) (kind, owner string) {
 func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
 	var invalid []*huma.ErrorDetail
 	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
-		if !beadmeta.ValidKey(k) {
+		switch {
+		case !beadmeta.ValidKey(k):
 			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		case k == beadmeta.InitiatorMetadataKey:
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "server-owned metadata key: the server records who made the request", Value: w.meta[k]})
 		}
 	}
 	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {

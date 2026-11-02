@@ -73,6 +73,15 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	targets := buildDemandTargets(env.CityName, env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths,
 		env.OpenSessions, noProbeEnv, stderr)
 	cache := newReadyDemandCacheWithReads(reads)
+	gateLegs := crossStoreGateLegs(env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths)
+	if v2, ok := reads.(*v2DemandReads); ok {
+		// The v2 pass does no remote I/O (CONTRACT v5 R4), and judging a
+		// row's cross-store blockers reads other stores: the external-reads
+		// lane gates a split city's snapshots, and the pass serves them.
+		v2.gateLegs = gateLegs
+	} else {
+		cache = cache.withGateLegs(gateLegs)
+	}
 
 	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)
@@ -90,6 +99,9 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		// A bead whose claims keep failing the same way is not spawn demand
 		// (claim_loop_guard.go).
 		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
+		// Nor is the work of a template whose seats stopped claiming
+		// (claim_stall_guard.go).
+		c.DefaultCounts, c.DefaultDemand = claimStallGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
 		for _, probeErr := range errs {
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}

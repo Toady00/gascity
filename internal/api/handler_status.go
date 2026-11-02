@@ -71,11 +71,12 @@ type StatusInput struct {
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
 //
-// Read-path gate: refuses to serve while the city-scope CachingStore is
-// priming (cacheLiveOr503 → typed 503) so the CLI falls back to its local
-// snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
-// age of the latest fresh observation so `gc status` can append a staleness
-// banner when the supervisor is lagging.
+// Read-path gate: cacheLiveOr503 refuses only a store that reports liveness.
+// The controller's city store is the bead-policy layer, which does not, so the
+// gate passes while the city cache primes and the not-live cache answers from
+// its backing store. CacheAgeS surfaces the cache's age so `gc status` can
+// append a staleness banner when the supervisor is lagging, except on a body
+// built without reading any bead store (statusCacheAge).
 //
 // The gate and the age both read the WORK store, which is the class the body's
 // expensive legs come from (work counts, store health). It deliberately does
@@ -113,10 +114,10 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: statusCacheAge(hit.Body, cacheAgeSeconds(store)), Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: statusCacheAge(hit.Body, cacheAgeSeconds(store)), Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -131,18 +132,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// build below, same as before this change.
 		//
 		// CacheAgeS reports the GREATER of the two staleness signals: how
-		// long ago this response entry was built, and cacheAgeSeconds(store)
-		// — the age of the CachingStore snapshot the body was built from.
-		// Reporting only the response-entry age would let a recently built
-		// entry sitting on top of a lagging reconciler under-report true
-		// staleness and suppress the banner `gc status` renders above
-		// cacheAgeBannerThresholdSeconds; reporting only the store age would
-		// hide the SWR delay. The max preserves both.
+		// long ago this response entry was built, and statusCacheAge — the
+		// age of the CachingStore snapshot the body was built from, 0 when it
+		// read none. Reporting only the response-entry age would let a
+		// recently built entry sitting on top of a lagging reconciler
+		// under-report true staleness and suppress the banner `gc status`
+		// renders above cacheAgeBannerThresholdSeconds; reporting only the
+		// store age would hide the SWR delay. The max preserves both.
 		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return &IndexOutput[StatusBody]{
 				Index:     hit.Index,
-				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+				CacheAgeS: max(age.Seconds(), statusCacheAge(hit.Body, cacheAgeSeconds(store))),
 				Body:      hit.Body,
 			}, nil
 		}
@@ -153,7 +154,19 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: statusCacheAge(resp, cacheAgeSeconds(store)), Body: resp}, nil
+}
+
+// statusCacheAge is the bead-cache age /status reports with body: storeAge,
+// the city store's cache age (cacheAgeSeconds), or 0 for a body built without
+// reading any bead store (StoresNotRead, a suspended city). A suspended
+// city's cache pauses its re-scans, so its age grows without bound and says
+// nothing about a body that never read it.
+func statusCacheAge(body StatusBody, storeAge float64) float64 {
+	if body.StoresNotRead {
+		return 0
+	}
+	return storeAge
 }
 
 // refreshStatusResponseInBackground kicks a detached rebuild of the /status
@@ -279,6 +292,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
+				SessionID:     info.id,
 				GroupName:     groupName,
 				Expanded:      isPool,
 			}
@@ -544,6 +558,7 @@ type statusSessionSnapshot struct {
 }
 
 type statusSessionInfo struct {
+	id          string
 	sessionName string
 	agentName   string
 	template    string
@@ -718,6 +733,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 			continue
 		}
 		info := statusSessionInfo{
+			id:          strings.TrimSpace(sessInfo.ID),
 			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
 			agentName:   strings.TrimSpace(sessInfo.AgentName),
 			template:    strings.TrimSpace(sessInfo.Template),
@@ -757,13 +773,15 @@ type statusWorkResult struct {
 // when its cache is clean (#1896). Stores are queried concurrently; results
 // aggregate in deterministic city/rig order.
 //
-// NOT identical to GET /beads/ready on a split city: that handler grew a
-// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
-// on a city with [beads.classes.graph] relocated the status ready count omits
-// graph-class ready work while /beads/ready includes it. Left divergent
-// deliberately rather than fixed here: this read is cache-only and error-lenient
-// by design (see cacheColdRigs below), which is the opposite of the graph leg's
-// fail-loud contract, so wiring one in is its own slice, not a rider.
+// On a split city the graph binding is one more READY leg, as it is for GET
+// /beads/ready (huma_handlers_beads.go): without it the status Ready count
+// omitted every graph-class ready step that /beads/ready served (read-audit
+// R12). It is read the way every other leg here is — cache-only through the
+// binding's CachingStore, error-lenient (a failure is a partial error, not a
+// failed status) — and its stored open/in-progress rows are not added, because
+// a city that relocates nothing never counted those either: its counts come
+// from the work stores. A city whose graph class is not relocated has no such
+// leg, so its counts are unchanged.
 //
 // Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
 // runs no cache, so every read would go to bd, and a bd read restarts a
@@ -804,6 +822,10 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 			includeStored: true,
 			includeReady:  rigName != cityName,
 		})
+	}
+
+	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
+		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
 	}
 
 	results := make([]statusWorkResult, len(queries))
