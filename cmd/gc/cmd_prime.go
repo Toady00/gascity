@@ -168,20 +168,21 @@ type promptBudgetJSON struct {
 
 // reportPromptDeliveryBudget computes and reports (on stderr) the
 // promptDelivery budget decision for a --strict gc prime invocation
-// (ga-q8wgom.1.2). It reuses promptDelivery/promptDeliverySupportFor
-// (ga-q8wgom.1.1) rather than re-deriving delivery mode independently, so
-// the strict diagnostic can never disagree with what a real launch does.
+// (ga-q8wgom.1.2). It reuses the launch's delivery decision
+// (startupPromptSource.delivery: the hook carrier, else promptDelivery and
+// promptDeliverySupportFor, ga-q8wgom.1.1) rather than re-deriving delivery
+// mode independently, so the strict diagnostic can never disagree with what a
+// real launch does.
 //
 // The returned error is non-nil exactly when promptDelivery hard-fails (an
 // oversized prompt on a runtime with no confirmed post-start delivery
 // path) — the caller must treat that as a strict failure and must not
 // write the rendered prompt to stdout.
 func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City, resolved *config.ResolvedProvider, stderr io.Writer) (*promptBudgetJSON, error) {
-	effProvider := effectiveSessionProvider(a.Session, cfg.Session.Provider)
-	sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
-	isACP := sessionTransport == config.SessionTransportACP
-
-	delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, cfg.Runtimes)
+	src := agentStartupPromptSource(cfg, a, resolved, prompt)
+	effProvider := src.RuntimeName
+	isACP := src.IsACP
+	delivery, dErr := src.delivery()
 
 	configuredMode := "arg"
 	switch {
@@ -197,6 +198,8 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 		effectiveMode = "hard-fail"
 	case delivery.OversizedFallback:
 		effectiveMode = "nudge-fallback"
+	case delivery.EffectiveMode == "hook":
+		effectiveMode = "hook"
 	case isACP || configuredMode == "none":
 		effectiveMode = "nudge"
 	case delivery.PromptFlag != "":

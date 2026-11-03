@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // hookRoleNudge is the configured nudge of the hook-role contract city's worker.
@@ -65,20 +66,22 @@ func resolvedReconcilerLaunch(t *testing.T, c contractCity, mode launchMode, _ s
 }
 
 // resolveHookRoleTemplate resolves the city's worker template the way the
-// reconciler does and returns it with the build params it used.
+// reconciler does, on the city's session provider, and returns it with the
+// build params it used.
 func resolveHookRoleTemplate(t *testing.T, c contractCity) (TemplateParams, *agentBuildParams) {
 	t.Helper()
 	agent := &c.cfg.Agents[0]
 	bp := &agentBuildParams{
-		fs:         fsys.OSFS{},
-		cityName:   c.cfg.Workspace.Name,
-		cityPath:   c.path,
-		workspace:  &c.cfg.Workspace,
-		providers:  c.cfg.Providers,
-		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
-		beaconTime: hookRoleBeaconTime,
-		beadNames:  map[string]string{},
-		stderr:     io.Discard,
+		fs:              fsys.OSFS{},
+		cityName:        c.cfg.Workspace.Name,
+		cityPath:        c.path,
+		workspace:       &c.cfg.Workspace,
+		providers:       c.cfg.Providers,
+		sessionProvider: c.cfg.Session.Provider,
+		lookPath:        func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
+		beaconTime:      hookRoleBeaconTime,
+		beadNames:       map[string]string{},
+		stderr:          io.Discard,
 	}
 	tp, err := resolveTemplate(bp, agent, agent.QualifiedName(), nil)
 	if err != nil {
@@ -265,25 +268,101 @@ func TestStartupPromptContractACPResumeStillReplaysRole(t *testing.T) {
 	}
 }
 
-// TestStartupPromptContractHookSuppliedRoleFreshStartKeepsLaunchPrompt pins
-// that the resume fix leaves fresh launches alone: a first start or a forced
-// fresh start of a hook-primed session still carries the role on the launch
-// path and marks it delivered.
-func TestStartupPromptContractHookSuppliedRoleFreshStartKeepsLaunchPrompt(t *testing.T) {
+// TestStartupPromptContractNonLocalRuntimeResumeStillReplaysRole pins that
+// every resume path checks the city's runtime before it trusts the hook. A
+// t3bridge city is not a local terminal runtime, and the agent's session =
+// "tmux" selects only the transport, so the reconciler and both worker
+// factories keep the role in the resume nudge.
+func TestStartupPromptContractNonLocalRuntimeResumeStillReplaysRole(t *testing.T) {
 	city := newHookRoleContractCity(t, "opencode", config.SessionTransportTmux, nil)
-	for _, mode := range []launchMode{contractLaunchMode(t, "first start"), contractLaunchMode(t, "forceFresh")} {
-		t.Run(mode.name, func(t *testing.T) {
-			cfg := resolvedReconcilerLaunch(t, city, mode, contractPromptBody)
-			if !carriedThroughArgv(cfg, contractPromptBody) || cfg.PromptFlag != "--prompt" {
-				t.Errorf("fresh start must carry the role through the --prompt launch flag, got PromptSuffix=%q PromptFlag=%q", abbreviate(cfg.PromptSuffix), cfg.PromptFlag)
-			}
-			if cfg.Nudge != hookRoleNudge {
-				t.Errorf("fresh start nudge = %q, want the configured nudge %q", abbreviate(cfg.Nudge), hookRoleNudge)
+	city.cfg.Session.Provider = "t3bridge"
+	for _, builder := range hookRoleResumeBuilders {
+		t.Run(builder.name, func(t *testing.T) {
+			cfg := builder.build(t, city, resumeWithKey(t), contractPromptBody)
+			if !strings.Contains(cfg.Nudge, contractPromptBody) {
+				t.Errorf("a resume in a t3bridge city must replay the role in the nudge, got %q", abbreviate(cfg.Nudge))
 			}
 			if cfg.Env[startupPromptDeliveredEnv] != "1" {
 				t.Errorf("%s = %q, want 1", startupPromptDeliveredEnv, cfg.Env[startupPromptDeliveredEnv])
 			}
 		})
+	}
+}
+
+// TestStartupPromptContractHookSuppliedRoleFreshStartIsNotDuplicated is the
+// regression for gastownhall/gascity#6982. A fresh start of a hook-primed
+// session gets its role from the plugin's system prompt, so the launch must not
+// submit it as well, in argv or in the nudge. The nudge carries only the
+// activation, here the beacon and the configured nudge, and the session is
+// still marked primed. Fresh starts are the reconciler's: the worker factories
+// only build resume launches.
+func TestStartupPromptContractHookSuppliedRoleFreshStartIsNotDuplicated(t *testing.T) {
+	wantActivation := runtime.FormatBeaconAt("test-city", "worker", false, hookRoleBeaconTime) + startupPromptNudgeSeparator + hookRoleNudge
+	for _, tc := range []struct {
+		provider string
+		session  string
+	}{
+		{provider: "opencode", session: config.SessionTransportTmux},
+		{provider: "mimocode"},
+	} {
+		city := newHookRoleContractCity(t, tc.provider, tc.session, nil)
+		for _, mode := range []launchMode{contractLaunchMode(t, "first start"), contractLaunchMode(t, "forceFresh")} {
+			t.Run(tc.provider+"/"+mode.name, func(t *testing.T) {
+				cfg := resolvedReconcilerLaunch(t, city, mode, contractPromptBody)
+				if carriedThroughArgv(cfg, contractPromptBody) || strings.Contains(cfg.Nudge, contractPromptBody) {
+					t.Errorf("fresh start submitted the role the hook already supplies: PromptSuffix=%q Nudge=%q", abbreviate(cfg.PromptSuffix), abbreviate(cfg.Nudge))
+				}
+				if cfg.PromptSuffix != "" || cfg.PromptFlag != "" {
+					t.Errorf("fresh start must not carry a launch prompt, got PromptSuffix=%q PromptFlag=%q", abbreviate(cfg.PromptSuffix), cfg.PromptFlag)
+				}
+				if cfg.Nudge != wantActivation {
+					t.Errorf("fresh start activation = %q, want %q", abbreviate(cfg.Nudge), wantActivation)
+				}
+				if cfg.Env[startupPromptDeliveredEnv] != "1" {
+					t.Errorf("%s = %q, want 1: the hook primes the session", startupPromptDeliveredEnv, cfg.Env[startupPromptDeliveredEnv])
+				}
+			})
+		}
+	}
+}
+
+// TestStartupPromptContractHookPrimedFreshStartWithoutRoleKeepsBeacon pins the
+// fresh start of a hook-primed session whose template renders no role: an
+// empty template file, or no template at all. gc prime --hook still hands the
+// plugin a builtin or default worker prompt, but there is no rendered role for
+// a kickoff to confirm or start, so the session's only turn is the beacon, the
+// same turn a launch that carries the startup prompt itself submits.
+func TestStartupPromptContractHookPrimedFreshStartWithoutRoleKeepsBeacon(t *testing.T) {
+	beacon := runtime.FormatBeaconAt("test-city", "worker", false, hookRoleBeaconTime)
+	for _, template := range []string{"empty template", "no template"} {
+		for _, origin := range []string{"manual", "automated"} {
+			t.Run(template+"/"+origin, func(t *testing.T) {
+				city := newHookRoleContractCity(t, "opencode", config.SessionTransportTmux, nil)
+				agent := &city.cfg.Agents[0]
+				agent.Nudge = ""
+				if template == "no template" {
+					agent.PromptTemplate = ""
+				} else if err := os.WriteFile(filepath.Join(city.path, agent.PromptTemplate), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				tp, _ := resolveHookRoleTemplate(t, city)
+				tp.ManualSession = origin == "manual"
+				cfg := prepareHookRoleLaunch(t, tp, contractLaunchMode(t, "first start"))
+				var turns []string
+				if parts := shellquote.Split(cfg.PromptSuffix); cfg.PromptSuffix != "" && len(parts) > 0 {
+					turns = append(turns, parts[0])
+				}
+				if cfg.Nudge != "" {
+					turns = append(turns, cfg.Nudge)
+				}
+				if len(turns) != 1 || turns[0] != beacon {
+					t.Errorf("fresh start without a rendered role must submit the beacon alone, got PromptSuffix=%q Nudge=%q", abbreviate(cfg.PromptSuffix), abbreviate(cfg.Nudge))
+				}
+				if cfg.Env[startupPromptDeliveredEnv] != "1" {
+					t.Errorf("%s = %q, want 1", startupPromptDeliveredEnv, cfg.Env[startupPromptDeliveredEnv])
+				}
+			})
+		}
 	}
 }
 
@@ -339,5 +418,28 @@ func TestStartupPromptContractClientProviderChatResumeKeepsBeacon(t *testing.T) 
 				t.Errorf("client chat hints must be left alone, got Nudge=%q Env=%v", abbreviate(cfg.Nudge), cfg.Env)
 			}
 		})
+	}
+}
+
+// TestStartupPromptContractClientProviderChatFreshStartGetsNoKickoff guards a
+// client's provider chat (#7721) on a hook-primed provider at its fresh start.
+// Its hook supplies no role, so it starts with the beacon on the launch path,
+// as upstream starts it, and never receives the role-confirmation kickoff a
+// manual worker session gets.
+func TestStartupPromptContractClientProviderChatFreshStartGetsNoKickoff(t *testing.T) {
+	city := newHookRoleContractCity(t, "opencode", config.SessionTransportTmux, nil)
+	agent := &city.cfg.Agents[0]
+	agent.Implicit = true
+	agent.Nudge = ""
+	tp, bp := resolveHookRoleTemplate(t, city)
+	tp.ManualSession = true
+	applyClientProviderChatStartupPrompt(bp, agent, agent, agent.QualifiedName(), "my-chat", &tp)
+	beacon := runtime.FormatBeaconAt("test-city", "worker", false, hookRoleBeaconTime)
+	cfg := prepareHookRoleLaunch(t, tp, contractLaunchMode(t, "first start"))
+	if !carriedThroughArgv(cfg, beacon) || cfg.PromptFlag != "--prompt" {
+		t.Errorf("client chat fresh start must carry the beacon on the launch path, got PromptSuffix=%q PromptFlag=%q", abbreviate(cfg.PromptSuffix), cfg.PromptFlag)
+	}
+	if cfg.Nudge != "" {
+		t.Errorf("client chat fresh start got a kickoff: %q", abbreviate(cfg.Nudge))
 	}
 }
