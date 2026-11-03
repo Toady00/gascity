@@ -35,8 +35,8 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 10
-	managedOpenCodeHookVersion = 8
-	managedMimoCodeHookVersion = 4
+	managedOpenCodeHookVersion = 9
+	managedMimoCodeHookVersion = 5
 	managedOmpHookVersion      = 2
 )
 
@@ -518,7 +518,12 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// A turn opens on a user-message id the session has not seen, not
 		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
 		// an id-order gate stops opening turns (#6629).
-		!hookContains(src, "state.userMessageIDs.has(messageID)") {
+		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
+		// OpenCode loads the workdir plugin for human-launched sessions
+		// too; without the identity guard the plugin runs gc lifecycle
+		// commands in sessions gc does not manage. The marker is the call:
+		// the function's definition alone does not guard anything.
+		!hookContains(src, "if (!managedSessionIdentityPresent())") {
 		return true
 	}
 	for _, marker := range []string{
@@ -566,7 +571,11 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "const turns = new Map()") ||
 		// A turn opens on an unseen user-message id, not a higher one
 		// (#6629, same shape as OpenCode).
-		!hookContains(src, "state.userMessageIDs.has(messageID)")
+		!hookContains(src, "state.userMessageIDs.has(messageID)") ||
+		// MiMo Code loads the workdir plugin for human-launched sessions
+		// too; without the identity guard the plugin runs gc lifecycle
+		// commands in sessions gc does not manage (same shape as OpenCode).
+		!hookContains(src, "if (!managedSessionIdentityPresent())")
 }
 
 func mimocodeHookVersion(content string) int {
