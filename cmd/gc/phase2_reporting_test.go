@@ -70,6 +70,11 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 
 func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp TemplateParams, cfg runtime.Config) workertest.Result {
 	evidence := phase2ConfigEvidence(tc, tp, cfg)
+	wantPromptFlag := tc.wantPromptFlag
+	hookSuppliesRole := phase2HookSuppliesRolePerTurnFamilies[tc.family]
+	if hookSuppliesRole {
+		wantPromptFlag = ""
+	}
 	switch {
 	case cfg.Command != tp.Command:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
@@ -80,12 +85,15 @@ func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp Templat
 	case startupPromptPayload(cfg) == "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			"startup prompt payload = empty, want beacon prompt materialized").WithEvidence(evidence)
-	case tc.wantPromptFlag != "" && cfg.PromptFlag != tc.wantPromptFlag:
+	case hookSuppliesRole && cfg.PromptSuffix != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
-			fmt.Sprintf("cfg.PromptFlag = %q, want %q", cfg.PromptFlag, tc.wantPromptFlag)).WithEvidence(evidence)
-	case tc.wantPromptFlag == "" && cfg.PromptFlag != "":
+			"hook-supplied role must not be submitted through argv").WithEvidence(evidence)
+	case hookSuppliesRole && cfg.Nudge != runtime.FormatBeaconAt("phase2-city", tp.Alias, false, time.Unix(0, 0))+startupPromptNudgeSeparator+"nudge-"+tc.family:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
-			fmt.Sprintf("cfg.PromptFlag = %q, want empty for arg-mode provider", cfg.PromptFlag)).WithEvidence(evidence)
+			fmt.Sprintf("cfg.Nudge = %q, want beacon plus activation only", cfg.Nudge)).WithEvidence(evidence)
+	case cfg.PromptFlag != wantPromptFlag:
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
+			fmt.Sprintf("cfg.PromptFlag = %q, want %q", cfg.PromptFlag, wantPromptFlag)).WithEvidence(evidence)
 	case cfg.Env["GC_DIR"] != tp.WorkDir:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("GC_DIR = %q, want %q", cfg.Env["GC_DIR"], tp.WorkDir)).WithEvidence(evidence)
@@ -164,6 +172,13 @@ func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedSta
 	want := "Base worker prompt\n\n---\n\nUser message:\nDo the first task."
 	if prepared != nil && strings.TrimSpace(prepared.cfg.PromptSuffix) == "" && prepared.cfg.Env[startupPromptDeliveredEnv] == "1" {
 		want = "Base worker prompt\n\n---\n\nnudge-" + tc.family + "\n\n---\n\nUser message:\nDo the first task."
+	}
+	if prepared != nil && phase2HookSuppliesRolePerTurnFamilies[tc.family] {
+		want = phase2Beacon(prepared) + "\n\n---\n\nnudge-" + tc.family + "\n\n---\n\nUser message:\nDo the first task."
+		if prepared.cfg.PromptSuffix != "" || prepared.cfg.PromptFlag != "" {
+			return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
+				"hook-primed initial message must use the activation nudge only").WithEvidence(evidence)
+		}
 	}
 	switch {
 	case got != want:
