@@ -486,7 +486,9 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`gc_routed_window="$r"; ` +
 		preferExecutablePoolDemandScript() +
+		routedLatchWindowRereadScript(topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
@@ -504,7 +506,9 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 // graph.v2 root, so an expanded root can sit in this tier although no worker
 // claims it, and a tier answering with only latches would exit before the
 // later tiers and targets ran, draining the worker while the controller still
-// counts the shadowed work. Then it keeps the remaining graph-v2 workflow
+// counts the shadowed work. The filter runs after the bounded read, so a
+// window made up only of latches says nothing about the rows past it;
+// routedLatchWindowRereadScript re-reads that case. Then it keeps the remaining graph-v2 workflow
 // roots, the never-expanded launch targets, available as fallbacks behind
 // executable routed work. The claim hook consumes candidates in order; without
 // that preference an older root can be returned forever while its ready child
@@ -523,8 +527,39 @@ func preferExecutablePoolDemandScript() string {
 // tier reads (routedReadyTierCommand). A worker claims only from these rows,
 // so the controller names pool demand bound to a managed worktree only for
 // rows inside this window: a seat placed for a row behind it would be served
-// none of its own work.
+// none of its own work. The same constant sizes the full-window trigger and
+// the cap of the latch re-read (routedLatchWindowRereadScript), so the read,
+// the trigger and the cap cannot drift apart.
 const RoutedReadyClaimWindow = 20
+
+// routedLatchWindowRereadScript runs after preferExecutablePoolDemandScript
+// and restores reachability past a routed window that held only latches. The
+// bounded read applies its limit before the latch filter, and an expanded
+// graph.v2 root stays ready for its whole run (it tracks, not blocks on, its
+// finalizer) and sorts ahead of its own steps. So when the oldest routed runs
+// have no unclaimed ready step, a full window holds only their latches, the
+// filter leaves [], and a newer run's ready step is never read while the
+// reconciler's unbounded count (poolDemandCountShell) keeps spawning for it.
+//
+// The re-read fires only when the bounded read returned a full window
+// ($gc_routed_window, saved before the filter) and the filter removed every
+// row; any other window takes the single bounded read. It uses the count
+// form's unbounded read, so the worker reaches exactly what the reconciler
+// counts, goes through the same latch filter and anchor ordering, and keeps
+// the bounded window's size for the hook's candidate list. A failed re-read
+// fails the query like the bounded read; a malformed bounded payload makes
+// `jq length` fail, leaving the trigger false and the payload to the hook's
+// fail-open handling.
+func routedLatchWindowRereadScript(topo QueryTopology) string {
+	reader := readyReaderCommand(topo.FederatedReady)
+	window := strconv.Itoa(RoutedReadyClaimWindow)
+	return `if [ "$r" = "[]" ] && [ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + window + `" ]; then ` +
+		`r=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		preferExecutablePoolDemandScript() +
+		`gc_routed_capped=$(printf "%s" "$r" | jq -c '.[:` + window + `]' 2>/dev/null); ` +
+		`[ -n "$gc_routed_capped" ] && r="$gc_routed_capped"; ` +
+		`fi; `
+}
 
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
@@ -542,7 +577,8 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// (RoutedReadyClaimWindow, not limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
-	// the result.
+	// the result. The limit applies before the latch filter;
+	// routedLatchWindowRereadScript re-reads a window the filter emptied.
 	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
 }
 
