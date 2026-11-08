@@ -3790,6 +3790,7 @@ func applyClientProviderChatStartupPrompt(bp *agentBuildParams, cfgAgent, resolv
 	}
 	beacon := runtime.FormatBeaconAt(bp.cityName, identity, false, bp.beaconTime)
 	tp.Prompt = composeStartupPrompt(beacon, "", suppressStartupPromptForAgent(resolveAgent))
+	tp.RoleRendered = false
 	tp.ClientProviderChat = true
 }
 

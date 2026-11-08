@@ -66,6 +66,12 @@ type TemplateParams struct {
 	// replaying the template when the provider hook already supplies it
 	// (startupPromptSource.resumeNudge).
 	Beacon string
+	// RoleRendered reports whether the agent's prompt template rendered text
+	// that Prompt carries under the beacon. It is false for an agent with no
+	// or an empty template, a suppressed startup prompt, and a client's
+	// provider chat. A hook-primed fresh start sends its role kickoff only
+	// when there is a rendered role (hookFreshActivation).
+	RoleRendered bool
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -122,6 +128,11 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// CitySessionProvider is the city's session provider (cfg.Session.Provider).
+	// Every non-ACP session runs on it whatever the agent's session override
+	// says, because the override selects only the transport
+	// (resolveSessionTransportProvider). Hook-role eligibility reads it.
+	CitySessionProvider string
 	// CityRuntimes is the city's pack-declared runtime registry
 	// (config.City.Runtimes), keyed by selection name. Consulted by
 	// promptDelivery's oversized-prompt guard so a pack-declared runtime
@@ -498,6 +509,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	isACP := sessionTransport == config.SessionTransportACP
 	includePrimeInstruction := prompt == "" && (!hasHooks || isACP)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
+	roleRendered := prompt != "" && !suppressStartupPrompt
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the runtime actually
@@ -811,6 +823,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Beacon:           runtime.FormatBeaconAt(p.cityName, qualifiedName, false, p.beaconTime),
+		RoleRendered:     roleRendered,
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
@@ -834,6 +847,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	params.CitySessionProvider = p.sessionProvider
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}
@@ -952,9 +966,8 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
-// needed by Provider.Start. When it materializes the rendered prompt into the
-// launch or nudge path, it marks the runtime env so SessionStart hooks can add
-// context without repeating the full startup prompt.
+// needed by Provider.Start. It selects the role carrier independently of the
+// activation nudge and records that selection in the runtime environment.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	cfg, _, _ := templateParamsToConfigWithDelivery(tp)
 	return cfg
@@ -975,10 +988,9 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // caller must not construct a runtime.Config or call Provider.Start in that
 // case (gastownhall/gascity ga-q8wgom.1.1).
 func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
-	// SessionStart hooks can enrich context, but the startup prompt still needs
-	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
-	// spawned workers sit idle at the provider prompt. The routing policy lives
-	// in the shared startup prompt plan.
+	// The routing policy lives in the shared startup prompt plan, which also
+	// selects the per-generation hook as the role carrier where it supplies the
+	// role (startupPromptSource.delivery).
 	plan, err := planStartupPrompt(tp.startupPromptSource(), startupPromptFreshLaunch)
 	if err != nil {
 		return runtime.Config{}, promptDeliveryResult{}, err
