@@ -121,10 +121,8 @@ func TestPhase2HookInstalledResumeInputDelivery(t *testing.T) {
 				reporter.Require(t, preClaimResumeRestartResult(tc, prepared))
 			})
 
-			// A fresh start with hooks installed still delivers the rendered
-			// prompt on the launch path for every family: the hook-primed
-			// resume shortcut must never leak into a first incarnation
-			// (gastownhall/gascity#5238).
+			// A fresh start must still activate (#5238). Per-generation hooks
+			// carry the role separately; other families keep the launch copy.
 			t.Run(string(workertest.RequirementInputInitialMessageFirstStart), func(t *testing.T) {
 				prepared := preparePhase2StartWithHooks(t, tc, "", map[string]string{
 					"initial_message": "Do the first task.",
