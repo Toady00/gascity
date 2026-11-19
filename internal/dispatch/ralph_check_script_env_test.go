@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // homeDerivedLookupScript models how a tool finds a per-user install: from the
@@ -51,7 +52,7 @@ func TestProcessRalphControlCheckReceivesCheckScriptEnv(t *testing.T) {
 	// Red: no setting, so the lookup runs against the city HOME and the
 	// verdict is a real fail that spends the single attempt.
 	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
-	result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl without check_script_env: %v", err)
 	}
@@ -64,7 +65,8 @@ func TestProcessRalphControlCheckReceivesCheckScriptEnv(t *testing.T) {
 
 	// Green: the operator hands the script the one variable it needs.
 	store, control = newUnlaunchableCheckRalphControl(t, checkPath)
-	result, err = ProcessControl(store, control, ProcessOptions{
+	result, err = ProcessControl(beadstest.Graph(store), control, ProcessOptions{
+		Work:           beadstest.Work(store),
 		CityPath:       cityPath,
 		CheckScriptEnv: map[string]string{"PYTHONUSERBASE": userBase},
 	})
@@ -95,7 +97,8 @@ func TestProcessRalphCheckReceivesCheckScriptEnv(t *testing.T) {
 
 	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 1)
 	mustClose(t, store, run1.ID)
-	result, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{
+		Work:           beadstest.Work(store),
 		CityPath:       cityPath,
 		CheckScriptEnv: map[string]string{"PYTHONUSERBASE": userBase},
 	})
@@ -120,7 +123,9 @@ func TestRunRalphCheckCheckScriptEnvCannotOverrideIdentity(t *testing.T) {
 	checkPath := writeCheckScript(t, cityPath, "env.sh", "#!/bin/sh\nprintf 'HOME=%s BEADS_DIR=%s\\n' \"$HOME\" \"$BEADS_DIR\" >&2\nexit 1\n")
 	check := beads.Bead{ID: "check-env", Type: "task", Metadata: map[string]string{beadmeta.CheckPathMetadataKey: checkPath}}
 
-	result, err := runRalphCheck(beads.NewMemStore(), check, beads.Bead{ID: "run-env", Type: "task"}, 1, ProcessOptions{
+	store := beads.NewMemStore()
+	result, err := runRalphCheck(beadstest.Graph(store), check, beads.Bead{ID: "run-env", Type: "task"}, 1, ProcessOptions{
+		Work:           beadstest.Work(store),
 		CityPath:       cityPath,
 		CheckScriptEnv: map[string]string{"HOME": "/elsewhere", "BEADS_DIR": "/elsewhere/.beads"},
 	})
