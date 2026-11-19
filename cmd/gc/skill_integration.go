@@ -338,8 +338,9 @@ func assignedSkillsPromptAppendix(p *agentBuildParams, cfgAgent *config.Agent, w
 	}
 	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-	stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-	stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+	materializationRT := materializationRuntimeFor(p.city, p.cityName, p.cityPath, p.sessionProvider)
+	stage1Delivers := canStage1Materialize(materializationRT, cfgAgent) && canonWorkDir == scopeRoot
+	stage2Delivers := isStage2EligibleSession(materializationRT, cfgAgent)
 	if !stage1Delivers && !stage2Delivers {
 		return ""
 	}
