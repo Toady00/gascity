@@ -69,12 +69,14 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 	}
 	// The script owns no server of its own (each box is its own screen
 	// session), so it does not declare server-lifecycle; nor does it type
-	// outcomes (input-outcome), so the whole input group skips. It has no
+	// outcomes (input-outcome) or declare program-status, so both groups skip. It has no
 	// clear-scrollback op, which neither carrier.ops nor input-outcome makes
 	// mandatory for it.
 	wantSkip := map[Code]bool{
 		ReqObservationClearScrollback: true,
 		ReqConnectionExec:             true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
+		// The script does not declare program-status.
+		ReqPStatusAnswers: true, ReqPStatusFollowsReport: true, ReqPStatusMissingSession: true,
 		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true, ReqFSHostHomeView: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
 		ReqServerStopSparesOtherCities: true,

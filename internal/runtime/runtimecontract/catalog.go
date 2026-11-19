@@ -75,6 +75,7 @@ const (
 	GroupServer     Group = "server"
 	GroupFSHost     Group = "fshost"
 	GroupInput      Group = "input"
+	GroupPStatus    Group = "pstatus"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -268,6 +269,15 @@ const (
 	ReqObservationLastActivity    Code = "RPP-OBSERVATION-002"
 	ReqObservationClearScrollback Code = "RPP-OBSERVATION-003"
 	ReqObservationCopyTo          Code = "RPP-OBSERVATION-004"
+
+	// The pstatus group checks the program-status token (RUNTIME-RPP-038): a
+	// script declaring it answers `program-status <name>` with one object gc
+	// accepts, reports the state each session's own program requested, read
+	// by that session's name, and exits 66 for a name no box holds. Every
+	// requirement is Optional: SKIP when program-status is not declared.
+	ReqPStatusAnswers        Code = "RPP-PSTATUS-001"
+	ReqPStatusFollowsReport  Code = "RPP-PSTATUS-002"
+	ReqPStatusMissingSession Code = "RPP-PSTATUS-003"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -357,6 +367,10 @@ var catalog = []Requirement{
 	{ReqObservationLastActivity, GroupObservation, "get-last-activity of a running box exits 0 with an RFC3339 time or nothing (absent = SKIP; exit 2 FAILs under report-activity; advisory)", true},
 	{ReqObservationClearScrollback, GroupObservation, "clear-scrollback of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or input-outcome; advisory)", true},
 	{ReqObservationCopyTo, GroupObservation, "copy-to into a running box exits 0 even when the source is missing: the copy is best-effort (absent = SKIP; advisory)", true},
+
+	{ReqPStatusAnswers, GroupPStatus, "program-status answers one object gc accepts for a running session; a declared exit 2 fails (declared program-status only)", true},
+	{ReqPStatusFollowsReport, GroupPStatus, "program-status reads each session by its own name; the first keeps its working state after the second starts idle (declared program-status only)", true},
+	{ReqPStatusMissingSession, GroupPStatus, "program-status on a name no box holds answers exit 66 (declared program-status only)", true},
 }
 
 // advisory reports whether a FAIL in group is kept out of v2_failed and
