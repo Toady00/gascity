@@ -307,6 +307,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		switch bead.Metadata[beadmeta.KindMetadataKey] {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.CheckScriptEnv = checkScriptEnvFromConfig(cfg)
 			opts.PrepareFragment = func(fragment *formula.FragmentRecipe, source beads.Bead) error {
 				return decorateDynamicFragmentRecipe(fragment, source, graphStore, loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
@@ -341,6 +342,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			opts.CheckScriptEnv = checkScriptEnvFromConfig(cfg)
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "batchfile_other.go",
         "batchfile_windows.go",
+        "check_script_env.go",
         "execenv.go",
         "process_env.go",
         "session_identity.go",
@@ -17,6 +18,7 @@ go_test(
     name = "execenv_test",
     srcs = [
         "batchfile_windows_test.go",
+        "check_script_env_test.go",
         "execenv_test.go",
         "execrequest_test.go",
         "process_env_test.go",

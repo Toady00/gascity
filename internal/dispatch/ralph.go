@@ -416,13 +416,14 @@ func runRalphCheck(store beads.GraphStore, bead, subject beads.Bead, attempt int
 	moleculeDir, artifactDir := resolveRalphCheckMoleculePaths(pathBead, cityPath)
 	opts.tracef("ralph check-start bead=%s script=%s timeout=%s", bead.ID, scriptPath, timeout)
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
-		BeadID:      conditionBeadID,
-		Iteration:   attempt,
-		CityPath:    cityPath,
-		StorePath:   storePath,
-		WorkDir:     resolvedWorkDir,
-		MoleculeDir: moleculeDir,
-		ArtifactDir: artifactDir,
+		BeadID:         conditionBeadID,
+		Iteration:      attempt,
+		CityPath:       cityPath,
+		StorePath:      storePath,
+		WorkDir:        resolvedWorkDir,
+		MoleculeDir:    moleculeDir,
+		ArtifactDir:    artifactDir,
+		CheckScriptEnv: opts.CheckScriptEnv,
 	}, timeout, 0)
 	opts.tracef("ralph check-done bead=%s outcome=%s dur=%s", bead.ID, result.Outcome, result.Duration)
 	if convergence.IsGateConfigError(result) {
